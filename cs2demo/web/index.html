@@ -11,6 +11,15 @@
     <div class="brand">Dust2 2D Demo Replay</div>
     <label>Demo <select id="demoSelect"></select></label>
     <button id="prepareBtn">加载解析结果</button>
+    <button id="createRoomBtn">创建房间</button>
+    <span id="shareStatusText" class="share-status-text"></span>
+    <div id="roomBar" class="room-bar" hidden>
+      <span>房间 <strong id="roomCodeText">-</strong></span>
+      <span id="roomParticipantsText">0/5</span>
+      <span id="roomModeText">Replay</span>
+      <button id="copyRoomLinkBtn" type="button">分享</button>
+      <button id="leaveRoomBtn" type="button">离开</button>
+    </div>
     <label>Round <select id="roundSelect"></select></label>
     <span class="mode-badge" id="modeText">Replay</span>
     <span id="tickText">tick -</span>
@@ -28,6 +37,9 @@
             <button type="button" class="map-tool-button sandbox-only" data-map-tool="move">移动</button>
             <button type="button" class="map-tool-button sandbox-only" data-map-tool="arrow">箭头</button>
             <button type="button" class="map-tool-button sandbox-only" data-map-tool="text">文字</button>
+            <button type="button" class="map-tool-button sandbox-only" data-map-tool="brush">画笔</button>
+            <button type="button" class="map-tool-button sandbox-only" data-map-tool="eraser">橡皮</button>
+            <button type="button" class="map-tool-button sandbox-only" data-map-tool="laser">激光</button>
             <button type="button" class="map-tool-button sandbox-only" data-map-tool="utility">道具</button>
             <span class="map-toolbar-divider"></span>
             <button type="button" id="zoomInBtn" class="map-tool-button">+</button>
@@ -96,6 +108,8 @@
       <button class="tab-button" data-tab="utilities" type="button">Utilities</button>
       <button class="tab-button" data-tab="players" type="button">Players</button>
       <button class="tab-button" data-tab="sandbox-objects" type="button">Sandbox Objects</button>
+      <button class="tab-button" data-tab="room" type="button">Room</button>
+      <button class="tab-button" data-tab="analysis-filters" type="button">Analysis Filters</button>
       <button class="tab-button" data-tab="settings" type="button">Settings</button>
       <button class="tab-button" data-tab="legend" type="button">Legend</button>
       <button id="bottomDockToggle" class="dock-toggle" type="button">收起</button>
@@ -115,6 +129,44 @@
 
     <div class="tab-panel" data-panel="sandbox-objects" hidden>
       <div id="sandboxObjectsList" class="compact-list"></div>
+    </div>
+
+    <div class="tab-panel" data-panel="room" hidden>
+      <div class="room-panel-grid">
+        <section>
+          <h2>Room 状态</h2>
+          <div id="roomStatusText" class="hint">未加入房间。</div>
+        </section>
+        <section>
+          <h2>参与者</h2>
+          <div id="roomParticipantsList" class="compact-list"></div>
+        </section>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="analysis-filters" hidden>
+      <div class="analysis-filter-grid">
+        <section>
+          <h2>筛选范围</h2>
+          <div class="filter-row">
+            <label>阵营 <select id="filterSide"><option value="all">全部</option><option value="T">T</option><option value="CT">CT</option></select></label>
+            <label>玩家 <select id="filterPlayer"><option value="all">全部</option></select></label>
+            <label>严重度 <select id="filterSeverity"><option value="all">全部</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option></select></label>
+            <label>地图显示 <select id="filterVisualMode"><option value="highlight">高亮匹配</option><option value="hide_others">隐藏其他</option><option value="ghost_others">淡化其他</option></select></label>
+          </div>
+        </section>
+        <section>
+          <h2>Finding 类型</h2>
+          <div class="toggle-grid compact">
+            <label><input class="finding-type-filter" data-finding-type="trade_failure" type="checkbox" checked /> 没补枪</label>
+            <label><input class="finding-type-filter" data-finding-type="entry_success" type="checkbox" checked /> 突破成功</label>
+            <label><input class="finding-type-filter" data-finding-type="entry_failure" type="checkbox" checked /> 突破失败</label>
+            <label><input class="finding-type-filter" data-finding-type="stall" type="checkbox" checked /> 便秘回合</label>
+            <label><input class="finding-type-filter" data-finding-type="postplant_loss" type="checkbox" checked /> 包后失败</label>
+          </div>
+          <button id="clearAnalysisFiltersBtn" type="button">清除筛选</button>
+        </section>
+      </div>
     </div>
 
     <div class="tab-panel" data-panel="settings" hidden>
@@ -177,6 +229,46 @@
       </ul>
     </div>
   </section>
+
+  <div id="shareRoomModal" class="modal-overlay" hidden>
+    <section class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="shareRoomTitle">
+      <h2 id="shareRoomTitle">房间已创建</h2>
+      <p id="shareRoomMessage" class="modal-message"></p>
+      <label class="modal-field">房间码
+        <input id="shareRoomCodeInput" type="text" readonly />
+      </label>
+      <label class="modal-field">分享链接
+        <input id="shareRoomUrlInput" type="text" readonly />
+      </label>
+      <div id="shareRoomWarning" class="modal-warning" hidden></div>
+      <div class="modal-help">
+        公网分享请用 <strong>--tunnel cloudflared</strong> 或设置 <strong>CS2PLUGIN_PUBLIC_BASE_URL</strong>；不要把 127.0.0.1 或 192.168.x.x 当作队友可用链接。
+      </div>
+      <div class="modal-actions">
+        <button id="copyShareRoomLinkBtn" type="button">复制链接</button>
+        <button id="enterCreatedRoomBtn" class="primary-button" type="button">进入房间</button>
+        <button id="closeShareRoomModalBtn" type="button">关闭</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="joinRoomModal" class="modal-overlay" hidden>
+    <section class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="joinRoomTitle">
+      <h2 id="joinRoomTitle">加入房间</h2>
+      <p id="joinRoomMessage" class="modal-message"></p>
+      <label class="modal-field">昵称
+        <input id="joinDisplayNameInput" type="text" maxlength="40" placeholder="例如：deawhale" />
+      </label>
+      <label class="modal-field">身份
+        <select id="joinRoleSelect"></select>
+      </label>
+      <div id="joinRoomWarning" class="modal-warning" hidden></div>
+      <div class="modal-actions">
+        <button id="confirmJoinRoomBtn" class="primary-button" type="button">加入房间</button>
+        <button id="cancelJoinRoomBtn" type="button">返回本地</button>
+      </div>
+    </section>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

@@ -23,6 +23,9 @@ const state = {
   sandbox: null,
   drag: null,
   arrowDraft: null,
+  brushDraft: null,
+  laserPoint: null,
+  remoteCursors: new Map(),
   activeFindingId: null,
   selectedUtility: null,
   utilityPuffCache: new Map(),
@@ -42,6 +45,53 @@ const state = {
   viewportDrag: null,
   playerSideBySteamid: new Map(),
   selectedPlayerId: null,
+  room: {
+    code: null,
+    clientId: null,
+    socket: null,
+    connected: false,
+    participants: {},
+    suppressBroadcast: false,
+    remoteApplying: false,
+    lastMoveSentAt: 0,
+    pendingSnapshot: null,
+    shareUrl: null,
+    publicReady: false,
+    shareMode: 'local',
+    warning: null,
+    pendingJoin: null,
+    stableClientId: null,
+    joinProfile: null,
+    heartbeatTimer: null,
+    reconnectTimer: null,
+    reconnectAttempts: 0,
+    intentionalClose: false,
+    reconnecting: false,
+    lastHeartbeatAckAt: 0,
+    lastCursorSentAt: 0,
+  },
+  shareStatus: {
+    publicReady: false,
+    publicBaseUrl: '',
+    shareMode: 'local',
+    warning: null,
+  },
+  analysisFilters: {
+    side: 'all',
+    playerId: 'all',
+    severity: 'all',
+    visualMode: 'highlight',
+    findingTypes: {
+      trade_failure: true,
+      trade_fail: true,
+      entry_success: true,
+      entry_failure: true,
+      entry_failed: true,
+      stall: true,
+      postplant_loss: true,
+      postplant: true,
+    },
+  },
   filters: {
     showHealthBars: true,
     showNames: true,
@@ -69,6 +119,31 @@ const state = {
 const els = {
   demoSelect: document.getElementById('demoSelect'),
   prepareBtn: document.getElementById('prepareBtn'),
+  createRoomBtn: document.getElementById('createRoomBtn'),
+  roomBar: document.getElementById('roomBar'),
+  roomCodeText: document.getElementById('roomCodeText'),
+  roomParticipantsText: document.getElementById('roomParticipantsText'),
+  roomModeText: document.getElementById('roomModeText'),
+  copyRoomLinkBtn: document.getElementById('copyRoomLinkBtn'),
+  leaveRoomBtn: document.getElementById('leaveRoomBtn'),
+  shareStatusText: document.getElementById('shareStatusText'),
+  shareRoomModal: document.getElementById('shareRoomModal'),
+  shareRoomTitle: document.getElementById('shareRoomTitle'),
+  shareRoomMessage: document.getElementById('shareRoomMessage'),
+  shareRoomCodeInput: document.getElementById('shareRoomCodeInput'),
+  shareRoomUrlInput: document.getElementById('shareRoomUrlInput'),
+  shareRoomWarning: document.getElementById('shareRoomWarning'),
+  copyShareRoomLinkBtn: document.getElementById('copyShareRoomLinkBtn'),
+  enterCreatedRoomBtn: document.getElementById('enterCreatedRoomBtn'),
+  closeShareRoomModalBtn: document.getElementById('closeShareRoomModalBtn'),
+  joinRoomModal: document.getElementById('joinRoomModal'),
+  joinRoomTitle: document.getElementById('joinRoomTitle'),
+  joinRoomMessage: document.getElementById('joinRoomMessage'),
+  joinDisplayNameInput: document.getElementById('joinDisplayNameInput'),
+  joinRoleSelect: document.getElementById('joinRoleSelect'),
+  joinRoomWarning: document.getElementById('joinRoomWarning'),
+  confirmJoinRoomBtn: document.getElementById('confirmJoinRoomBtn'),
+  cancelJoinRoomBtn: document.getElementById('cancelJoinRoomBtn'),
   roundSelect: document.getElementById('roundSelect'),
   prevRoundBtn: document.getElementById('prevRoundBtn'),
   back5Btn: document.getElementById('back5Btn'),
@@ -100,6 +175,14 @@ const els = {
   utilitiesList: document.getElementById('utilitiesList'),
   playersList: document.getElementById('playersList'),
   sandboxObjectsList: document.getElementById('sandboxObjectsList'),
+  roomStatusText: document.getElementById('roomStatusText'),
+  roomParticipantsList: document.getElementById('roomParticipantsList'),
+  filterSide: document.getElementById('filterSide'),
+  filterPlayer: document.getElementById('filterPlayer'),
+  filterSeverity: document.getElementById('filterSeverity'),
+  filterVisualMode: document.getElementById('filterVisualMode'),
+  findingTypeFilters: Array.from(document.querySelectorAll('.finding-type-filter')),
+  clearAnalysisFiltersBtn: document.getElementById('clearAnalysisFiltersBtn'),
   utilityDetail: document.getElementById('utilityDetail'),
   showHealthBars: document.getElementById('showHealthBars'),
   showNames: document.getElementById('showNames'),
@@ -164,7 +247,85 @@ function setStatus(text) {
   els.statusText.textContent = text;
 }
 
+function roomCodeFromUrl() {
+  const pathMatch = window.location.pathname.match(/^\/r\/([^/]+)\/?$/);
+  if (pathMatch) return decodeURIComponent(pathMatch[1]);
+  return new URLSearchParams(window.location.search).get('room');
+}
+
+function isRoomMode() {
+  return Boolean(state.room.code && state.room.connected && state.room.socket);
+}
+
+function canonicalRoomPath(roomCode) {
+  return `/r/${encodeURIComponent(roomCode)}`;
+}
+
+function wsUrlForRoom(roomCode) {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/ws/rooms/${encodeURIComponent(roomCode)}`;
+}
+
+function storedJoinProfile() {
+  return {
+    display_name: localStorage.getItem('cs2demo.room.displayName') || '',
+    role: localStorage.getItem('cs2demo.room.role') || 'viewer',
+    assigned_player_id: localStorage.getItem('cs2demo.room.assignedPlayerId') || '',
+  };
+}
+
+function saveJoinProfile(profile) {
+  localStorage.setItem('cs2demo.room.displayName', profile.display_name || '');
+  localStorage.setItem('cs2demo.room.role', profile.role || 'viewer');
+  localStorage.setItem('cs2demo.room.assignedPlayerId', profile.assigned_player_id || '');
+}
+
+function stableRoomClientId() {
+  const key = 'cs2demo.room.clientId';
+  let clientId = localStorage.getItem(key);
+  if (!clientId) {
+    clientId = crypto.randomUUID ? crypto.randomUUID() : `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    localStorage.setItem(key, clientId);
+  }
+  state.room.stableClientId = clientId;
+  return clientId;
+}
+
+function joinProfileWithClientId(profile = {}) {
+  return {
+    ...profile,
+    client_id: stableRoomClientId(),
+  };
+}
+
+async function loadDemoReplay(demoId, options = {}) {
+  pause({ redraw: false });
+  state.demoId = demoId;
+  els.demoSelect.value = demoId;
+  state.roundCache = new Map();
+  state.roundData = null;
+  state.currentRound = null;
+  state.currentTick = null;
+  state.frameIndex = 0;
+  state.activeFindingId = null;
+  state.selectedUtility = null;
+  state.yawCacheBySteamid.clear();
+  setStatus('准备 replay 数据...');
+  await api(`/api/demos/${state.demoId}/prepare`, { method: 'POST' });
+  state.manifest = await api(`/api/demos/${state.demoId}/replay.json`);
+  state.replayIndex = buildReplayIndex(state.manifest);
+  await loadRadarImage(state.manifest.map.radar_url);
+  fillRounds();
+  refreshPlayerFilterOptions();
+  renderFindings();
+  renderUtilityDetail();
+  const firstRound = options.roundNumber ?? state.replayIndex.roundNumbers[0];
+  if (firstRound !== undefined) await switchToRound(firstRound, { tick: options.tick, suppressBroadcast: true });
+  setStatus('已加载');
+}
+
 async function init() {
+  await loadShareStatus();
   const payload = await api('/api/demos');
   state.demos = payload.demos;
   state.demoId = payload.default_demo_id;
@@ -182,12 +343,23 @@ async function init() {
   updateNavigationButtons();
   updateSandboxButtons();
   updateMapToolbar();
+  renderRoomPanel();
   drawEmpty();
+  const roomCode = roomCodeFromUrl();
+  if (roomCode) await loadRoomFromUrl(roomCode);
 }
 
 function bindEvents() {
   els.demoSelect.addEventListener('change', () => { state.demoId = els.demoSelect.value; });
   els.prepareBtn.addEventListener('click', prepareAndLoad);
+  els.createRoomBtn?.addEventListener('click', createRoomFromCurrentState);
+  els.copyRoomLinkBtn?.addEventListener('click', () => openShareRoomModal());
+  els.leaveRoomBtn?.addEventListener('click', leaveRoom);
+  els.copyShareRoomLinkBtn?.addEventListener('click', copyRoomLink);
+  els.enterCreatedRoomBtn?.addEventListener('click', enterCreatedRoom);
+  els.closeShareRoomModalBtn?.addEventListener('click', closeShareRoomModal);
+  els.confirmJoinRoomBtn?.addEventListener('click', confirmJoinRoom);
+  els.cancelJoinRoomBtn?.addEventListener('click', cancelJoinRoom);
   els.roundSelect.addEventListener('change', () => switchToRound(Number(els.roundSelect.value)));
   els.prevRoundBtn.addEventListener('click', previousRound);
   els.back5Btn.addEventListener('click', () => seekBySeconds(-5));
@@ -239,6 +411,33 @@ function bindEvents() {
   bindFilter(els.showHegrenade, value => { state.filters.types.hegrenade = value; });
   bindFilter(els.showMolotov, value => { state.filters.types.molotov = value; });
   bindFilter(els.showDecoy, value => { state.filters.types.decoy = value; });
+  bindAnalysisFilters();
+}
+
+function bindAnalysisFilters() {
+  els.filterSide?.addEventListener('change', () => {
+    state.analysisFilters.side = els.filterSide.value;
+    refreshAnalysisFilterViews();
+  });
+  els.filterPlayer?.addEventListener('change', () => {
+    state.analysisFilters.playerId = els.filterPlayer.value;
+    refreshAnalysisFilterViews();
+  });
+  els.filterSeverity?.addEventListener('change', () => {
+    state.analysisFilters.severity = els.filterSeverity.value;
+    refreshAnalysisFilterViews();
+  });
+  els.filterVisualMode?.addEventListener('change', () => {
+    state.analysisFilters.visualMode = els.filterVisualMode.value;
+    refreshAnalysisFilterViews();
+  });
+  for (const input of els.findingTypeFilters || []) {
+    input.addEventListener('change', () => {
+      state.analysisFilters.findingTypes[input.dataset.findingType] = input.checked;
+      refreshAnalysisFilterViews();
+    });
+  }
+  els.clearAnalysisFiltersBtn?.addEventListener('click', clearAnalysisFilters);
 }
 
 function bindFilter(input, setter) {
@@ -347,7 +546,7 @@ function setMapTool(tool) {
 
 function updateMapToolbar() {
   const inSandbox = Boolean(state.sandbox);
-  if (!inSandbox && ['move', 'arrow', 'text', 'utility'].includes(state.activeMapTool)) state.activeMapTool = 'select';
+  if (!inSandbox && ['move', 'arrow', 'text', 'brush', 'eraser', 'laser', 'utility'].includes(state.activeMapTool)) state.activeMapTool = 'select';
   for (const button of els.mapToolButtons) {
     const sandboxOnly = button.classList.contains('sandbox-only');
     button.hidden = sandboxOnly && !inSandbox;
@@ -466,31 +665,617 @@ function onCanvasWheel(evt) {
 
 async function prepareAndLoad() {
   try {
-    pause({ redraw: false });
-    state.demoId = els.demoSelect.value;
-    state.roundCache = new Map();
-    state.roundData = null;
-    state.currentRound = null;
-    state.currentTick = null;
-    state.frameIndex = 0;
-    state.activeFindingId = null;
-    state.selectedUtility = null;
-    state.yawCacheBySteamid.clear();
-    setStatus('准备 replay 数据...');
-    await api(`/api/demos/${state.demoId}/prepare`, { method: 'POST' });
-    state.manifest = await api(`/api/demos/${state.demoId}/replay.json`);
-    state.replayIndex = buildReplayIndex(state.manifest);
-    await loadRadarImage(state.manifest.map.radar_url);
-    fillRounds();
-    renderFindings();
-    renderUtilityDetail();
-    const firstRound = state.replayIndex.roundNumbers[0];
-    if (firstRound !== undefined) await switchToRound(firstRound);
-    setStatus('已加载');
+    if (isRoomMode()) {
+      await switchRoomDemo(els.demoSelect.value);
+      return;
+    }
+    await loadDemoReplay(els.demoSelect.value);
   } catch (err) {
     console.error(err);
     setStatus(`加载失败：${err.message}`);
   }
+}
+
+async function switchRoomDemo(demoId) {
+  const previousDemoId = state.demoId;
+  try {
+    await loadDemoReplay(demoId, { suppressRoomSwitch: true });
+    sendRoomMessage('switch_demo', {
+      demo_id: state.demoId,
+      round_number: state.currentRound,
+      tick: state.currentTick,
+      title: `${state.demoId} R${state.currentRound || 1}`,
+    });
+    setStatus(`房间已切换到 ${state.demoId}`);
+  } catch (err) {
+    if (previousDemoId && previousDemoId !== demoId) els.demoSelect.value = previousDemoId;
+    throw err;
+  }
+}
+
+async function loadShareStatus() {
+  try {
+    const status = await api('/api/share/status');
+    state.shareStatus.publicReady = Boolean(status.public_ready);
+    state.shareStatus.publicBaseUrl = status.public_base_url || '';
+    state.shareStatus.shareMode = status.share_mode || 'local';
+    state.shareStatus.warning = status.warning || status.message || null;
+    renderShareStatus();
+  } catch (err) {
+    console.error(err);
+    state.shareStatus.warning = '无法读取公网分享状态。';
+    renderShareStatus();
+  }
+}
+
+function renderShareStatus() {
+  if (!els.shareStatusText) return;
+  els.shareStatusText.classList.toggle('public-ready', state.shareStatus.publicReady);
+  els.shareStatusText.textContent = state.shareStatus.publicReady ? `公网分享：${state.shareStatus.shareMode}` : '本地模式：队友打不开本机链接';
+}
+
+async function createRoomFromCurrentState() {
+  try {
+    if (!state.manifest) await loadDemoReplay(els.demoSelect.value);
+    const payload = {
+      demo_id: state.demoId,
+      round_number: state.currentRound,
+      tick: state.currentTick,
+      title: `${state.demoId} R${state.currentRound || 1}`,
+    };
+    const result = await api('/api/rooms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const room = result.room;
+    applyRoomShareMetadata(result, room.room_code);
+    history.replaceState(null, '', canonicalRoomPath(room.room_code));
+    await applyRoomSnapshot(room, null);
+    openShareRoomModal();
+    setBottomTab('room');
+  } catch (err) {
+    console.error(err);
+    setStatus(`创建房间失败：${err.message}`);
+  }
+}
+
+async function loadRoomFromUrl(roomCode) {
+  try {
+    const payload = await api(`/api/rooms/${encodeURIComponent(roomCode)}`);
+    applyRoomShareMetadata(payload, payload.room.room_code);
+    await applyRoomSnapshot(payload.room, null);
+    openJoinRoomModal(payload.room);
+    setStatus(`房间 ${payload.room.room_code} 已加载，等待加入`);
+  } catch (err) {
+    console.error(err);
+    setStatus(`加入房间失败：${err.message}`);
+  }
+}
+
+function applyRoomShareMetadata(payload, fallbackCode = null) {
+  state.room.code = payload.room_code || fallbackCode || state.room.code;
+  state.room.shareUrl = payload.share_url || payload.join_url || state.room.shareUrl || (state.room.code ? `${window.location.origin}${canonicalRoomPath(state.room.code)}` : null);
+  state.room.publicReady = Boolean(payload.public_ready);
+  state.room.shareMode = payload.share_mode || 'local';
+  state.room.warning = payload.warning || null;
+}
+
+async function applyRoomSnapshot(room, clientId) {
+  if (!room) return;
+  state.room.code = room.room_code;
+  if (clientId) state.room.clientId = clientId;
+  state.room.participants = room.participants || {};
+  state.room.pendingSnapshot = room;
+  if (room.demo_id && (room.demo_id !== state.demoId || !state.manifest)) {
+    await loadDemoReplay(room.demo_id, { roundNumber: room.playback?.round_number, tick: room.playback?.tick });
+  } else if (room.playback?.round_number !== undefined) {
+    await withSuppressedRoomBroadcastAsync(() => switchToRound(room.playback.round_number, { tick: room.playback.tick, suppressBroadcast: true }));
+  }
+  if (room.mode === 'sandbox' && room.sandbox?.active !== false) {
+    applyRoomSandbox(room.sandbox);
+  } else if (state.sandbox && room.mode === 'replay') {
+    exitSandboxLocal();
+  }
+  renderRoomPanel();
+}
+
+async function connectRoom(roomCode, profile = {}) {
+  const profileHasClientId = Boolean(profile.client_id);
+  resetRoomConnectionTimers();
+  if (state.room.socket) {
+    state.room.intentionalClose = true;
+    state.room.socket.intentionalClose = true;
+    state.room.socket.close();
+  }
+  state.room.code = roomCode;
+  state.room.joinProfile = profileHasClientId ? profile : joinProfileWithClientId(profile);
+  state.room.intentionalClose = false;
+  const socket = new WebSocket(wsUrlForRoom(roomCode));
+  const profileForConnection = state.room.joinProfile;
+  state.room.socket = socket;
+  await new Promise((resolve, reject) => {
+    socket.addEventListener('open', resolve, { once: true });
+    socket.addEventListener('error', () => reject(new Error('房间连接失败。可能是公网隧道不支持 WebSocket，或服务已停止。')), { once: true });
+  });
+  socket.send(JSON.stringify({ type: 'join_room', payload: profileForConnection }));
+  socket.addEventListener('message', event => handleRoomSocketMessage(event));
+  socket.addEventListener('close', event => {
+    if (state.room.socket !== socket && !socket.intentionalClose) return;
+    const duplicateSession = event.code === 4410;
+    const shouldReconnect = !duplicateSession && !state.room.intentionalClose && !socket.intentionalClose && state.room.code && state.room.joinProfile;
+    state.room.connected = false;
+    if (state.room.socket === socket) state.room.socket = null;
+    stopRoomHeartbeat();
+    if (duplicateSession) {
+      state.room.reconnecting = false;
+      setStatus('同一身份已在其他页面连接，此页面已断开房间。');
+    } else if (shouldReconnect) {
+      scheduleRoomReconnect();
+    }
+    renderRoomPanel();
+  });
+}
+
+function resetRoomConnectionTimers() {
+  stopRoomHeartbeat();
+  if (state.room.reconnectTimer) clearTimeout(state.room.reconnectTimer);
+  state.room.reconnectTimer = null;
+  state.room.reconnecting = false;
+}
+
+function startRoomHeartbeat() {
+  stopRoomHeartbeat();
+  state.room.lastHeartbeatAckAt = Date.now();
+  state.room.heartbeatTimer = setInterval(() => {
+    if (!state.room.socket || state.room.socket.readyState !== WebSocket.OPEN) return;
+    const sinceAck = Date.now() - state.room.lastHeartbeatAckAt;
+    if (sinceAck > 45000) {
+      state.room.socket.close();
+      return;
+    }
+    state.room.socket.send(JSON.stringify({ type: 'heartbeat', payload: { client_time_ms: Date.now() } }));
+  }, 12000);
+}
+
+function stopRoomHeartbeat() {
+  if (state.room.heartbeatTimer) clearInterval(state.room.heartbeatTimer);
+  state.room.heartbeatTimer = null;
+}
+
+function scheduleRoomReconnect() {
+  if (state.room.reconnectTimer || !state.room.code || !state.room.joinProfile) return;
+  state.room.reconnecting = true;
+  const delay = Math.min(30000, 1000 * 2 ** Math.min(state.room.reconnectAttempts, 5));
+  state.room.reconnectTimer = setTimeout(async () => {
+    state.room.reconnectTimer = null;
+    state.room.reconnectAttempts += 1;
+    try {
+      await connectRoom(state.room.code, state.room.joinProfile);
+      state.room.reconnectAttempts = 0;
+      state.room.reconnecting = false;
+      setStatus(`房间 ${state.room.code} 已重连`);
+    } catch (err) {
+      console.error(err);
+      setStatus('房间连接中断，正在重试...');
+      scheduleRoomReconnect();
+    } finally {
+      renderRoomPanel();
+    }
+  }, delay);
+  renderRoomPanel();
+}
+
+async function handleRoomSocketMessage(event) {
+  const message = JSON.parse(event.data);
+  if (message.type === 'heartbeat_ack') {
+    state.room.lastHeartbeatAckAt = Date.now();
+    return;
+  }
+  if (message.type === 'room_snapshot') {
+    state.room.connected = true;
+    state.room.reconnecting = false;
+    state.room.reconnectAttempts = 0;
+    state.room.clientId = message.client_id;
+    startRoomHeartbeat();
+    await applyRoomSnapshot(message.room, message.client_id);
+    setStatus(`房间 ${state.room.code} 已连接`);
+    return;
+  }
+  if (message.type === 'participant_update') {
+    state.room.participants = message.participants || {};
+    renderRoomPanel();
+    return;
+  }
+  if (message.type === 'cursor') {
+    applyRemoteCursor(message.client_id, message.payload);
+    return;
+  }
+  if (message.type === 'state_update') {
+    await applyRoomStateUpdate(message);
+  }
+}
+
+function isOwnRoomEcho(message) {
+  return message.client_id && state.room.clientId && message.client_id === state.room.clientId;
+}
+
+async function applyRoomStateUpdate(message) {
+  if (isOwnRoomEcho(message)) {
+    renderRoomPanel();
+    return;
+  }
+  const payload = message.payload || {};
+  if (message.patch_type === 'playback_control' && state.sandbox) exitSandboxLocal();
+  state.room.remoteApplying = true;
+  try {
+    if (payload.mode) {
+      if (els.roomModeText) els.roomModeText.textContent = payload.mode;
+    }
+    if (message.patch_type === 'switch_demo' && payload.demo_id) {
+      await loadDemoReplay(payload.demo_id, { roundNumber: payload.playback?.round_number, tick: payload.playback?.tick, suppressRoomSwitch: true });
+    }
+    if (payload.playback) {
+      const playback = payload.playback;
+      await withSuppressedRoomBroadcastAsync(async () => {
+        if (Number(playback.round_number) !== Number(state.currentRound)) await switchToRound(Number(playback.round_number), { tick: playback.tick, suppressBroadcast: true });
+        else if (playback.tick !== undefined) seekToTick(Number(playback.tick), { suppressBroadcast: true });
+        if (playback.is_playing) play({ suppressBroadcast: true });
+        else pause({ suppressBroadcast: true });
+      });
+    }
+    if (message.patch_type === 'enter_sandbox' && payload.sandbox) {
+      const sandboxRound = Number(payload.sandbox.source_round_number ?? payload.sandbox.round);
+      if (Number.isFinite(sandboxRound) && sandboxRound !== Number(state.currentRound)) {
+        await switchToRound(sandboxRound, { tick: payload.sandbox.source_tick, suppressBroadcast: true });
+      }
+      applyRoomSandbox(payload.sandbox);
+    } else if (payload.sandbox && message.patch_type !== 'reset_sandbox_to_source') {
+      applyRoomSandbox(payload.sandbox);
+    }
+    if (message.patch_type === 'resume_replay') {
+      exitSandboxLocal();
+      if (payload.playback) await switchToRound(Number(payload.playback.round_number), { tick: payload.playback.tick, autoplay: payload.playback.is_playing, suppressBroadcast: true });
+    }
+    if (message.patch_type === 'move_token') applyRemoteTokenMove(payload);
+    if (message.patch_type === 'create_object') appendRemoteObject(payload.object);
+    if (message.patch_type === 'delete_object') deleteRemoteObject(payload.object_id);
+    if (message.patch_type === 'create_utility') appendRemoteUtility(payload.utility, payload.currentTick, payload.nextUtilityThrowTick);
+    if (message.patch_type === 'clear_utilities' && state.sandbox) {
+      state.sandbox.planned_utilities = [];
+      state.sandbox.nextUtilityThrowTick = payload.nextUtilityThrowTick ?? state.sandbox.source_tick;
+      state.selectedUtility = null;
+    }
+    if (message.patch_type === 'reset_sandbox_to_source' && payload.sandbox) applyRoomSandbox(payload.sandbox);
+    if (message.patch_type === 'sandbox_time_control' && state.sandbox) {
+      if (payload.currentTick !== undefined) state.sandbox.currentTick = payload.currentTick;
+      if (payload.playing && !state.sandbox.playing) playSandbox({ suppressBroadcast: true });
+      else if (!payload.playing) stopSandboxPlayback({ suppressBroadcast: true });
+    }
+    renderRoomPanel();
+    renderSideLists();
+    renderUtilityDetail();
+    updateSandboxButtons();
+    updateNavigationButtons();
+    draw();
+  } finally {
+    state.room.remoteApplying = false;
+  }
+}
+
+function disconnectRoom(options = {}) {
+  state.room.intentionalClose = true;
+  resetRoomConnectionTimers();
+  if (state.room.socket) {
+    state.room.socket.intentionalClose = true;
+    state.room.socket.close();
+  }
+  state.room.socket = null;
+  state.room.connected = false;
+  state.room.clientId = null;
+  state.room.participants = {};
+  state.room.joinProfile = null;
+  state.room.intentionalClose = false;
+  if (!options.keepUrl && state.room.code) history.replaceState(null, '', '/');
+  const currentCode = state.room.code;
+  if (!options.keepMetadata) {
+    state.room.shareUrl = null;
+    state.room.publicReady = false;
+    state.room.shareMode = 'local';
+    state.room.warning = null;
+    state.room.pendingJoin = null;
+  }
+  state.room.code = options.keepMetadata ? currentCode : null;
+  renderRoomPanel();
+}
+
+function leaveRoom() {
+  disconnectRoom();
+  closeJoinRoomModal();
+  closeShareRoomModal();
+  setStatus('已离开房间');
+}
+
+async function copyRoomLink() {
+  if (!state.room.code) return;
+  const url = state.room.shareUrl || `${window.location.origin}${canonicalRoomPath(state.room.code)}`;
+  await navigator.clipboard.writeText(url);
+  setStatus(state.room.publicReady ? '公网房间链接已复制' : '本地房间链接已复制，但队友无法通过公网加入');
+}
+
+function openShareRoomModal() {
+  if (!state.room.code || !els.shareRoomModal) return;
+  els.shareRoomTitle.textContent = state.room.publicReady ? '房间已创建' : '房间已创建，但当前不是公网链接';
+  els.shareRoomMessage.textContent = state.room.publicReady ? '复制下面的公网 HTTPS 链接给队友即可加入。' : '当前链接只适合本机调试，队友不能通过公网打开。';
+  els.shareRoomCodeInput.value = state.room.code || '';
+  els.shareRoomUrlInput.value = state.room.shareUrl || `${window.location.origin}${canonicalRoomPath(state.room.code)}`;
+  els.shareRoomWarning.hidden = state.room.publicReady;
+  els.shareRoomWarning.textContent = state.room.warning || '请使用 --tunnel cloudflared 或设置 CS2PLUGIN_PUBLIC_BASE_URL 后再分享给队友。';
+  els.shareRoomModal.hidden = false;
+}
+
+function closeShareRoomModal() {
+  if (els.shareRoomModal) els.shareRoomModal.hidden = true;
+}
+
+function openJoinRoomModal(room) {
+  if (!room || !els.joinRoomModal) return;
+  state.room.pendingJoin = room;
+  const profile = storedJoinProfile();
+  els.joinRoomTitle.textContent = '加入房间';
+  els.joinRoomMessage.textContent = `你正在加入房间：${room.title || room.room_code}`;
+  els.joinDisplayNameInput.value = profile.display_name || '';
+  fillJoinRoleOptions(profile);
+  els.joinRoomWarning.hidden = !state.room.warning;
+  els.joinRoomWarning.textContent = state.room.warning || '';
+  els.joinRoomModal.hidden = false;
+  setTimeout(() => els.joinDisplayNameInput?.focus(), 0);
+}
+
+function closeJoinRoomModal() {
+  if (els.joinRoomModal) els.joinRoomModal.hidden = true;
+}
+
+function fillJoinRoleOptions(profile = {}) {
+  if (!els.joinRoleSelect) return;
+  els.joinRoleSelect.innerHTML = '';
+  const viewer = document.createElement('option');
+  viewer.value = 'viewer:';
+  viewer.textContent = '旁观者';
+  els.joinRoleSelect.appendChild(viewer);
+  for (const player of state.manifest?.players || []) {
+    const playerId = String(player.steamid || player.name || '');
+    if (!playerId) continue;
+    const option = document.createElement('option');
+    option.value = `player:${encodeURIComponent(playerId)}`;
+    option.textContent = player.name || playerId;
+    els.joinRoleSelect.appendChild(option);
+  }
+  const selected = profile.role === 'player' && profile.assigned_player_id ? `player:${encodeURIComponent(profile.assigned_player_id)}` : 'viewer:';
+  els.joinRoleSelect.value = selected;
+}
+
+function joinProfileFromModal() {
+  const rawName = els.joinDisplayNameInput?.value?.trim() || `User ${Math.floor(Math.random() * 1000)}`;
+  const [role, encodedPlayerId] = String(els.joinRoleSelect?.value || 'viewer:').split(':');
+  const assignedPlayerId = encodedPlayerId ? decodeURIComponent(encodedPlayerId) : '';
+  return {
+    display_name: rawName.slice(0, 40),
+    role: role || 'viewer',
+    assigned_player_id: assignedPlayerId || null,
+  };
+}
+
+async function enterCreatedRoom() {
+  if (!state.room.code) return;
+  closeShareRoomModal();
+  openJoinRoomModal(state.room.pendingSnapshot || { room_code: state.room.code, title: state.room.code });
+}
+
+async function confirmJoinRoom() {
+  if (!state.room.code) return;
+  if (els.confirmJoinRoomBtn) els.confirmJoinRoomBtn.disabled = true;
+  const profile = joinProfileFromModal();
+  saveJoinProfile(profile);
+  try {
+    await connectRoom(state.room.code, profile);
+    closeJoinRoomModal();
+    history.replaceState(null, '', canonicalRoomPath(state.room.code));
+    setBottomTab('room');
+  } catch (err) {
+    console.error(err);
+    if (els.joinRoomWarning) {
+      els.joinRoomWarning.hidden = false;
+      els.joinRoomWarning.textContent = '房间连接失败。可能是公网隧道不支持 WebSocket，或服务已停止。';
+    }
+    setStatus(`房间连接失败：${err.message}`);
+  } finally {
+    if (els.confirmJoinRoomBtn) els.confirmJoinRoomBtn.disabled = false;
+  }
+}
+
+function cancelJoinRoom() {
+  closeJoinRoomModal();
+  disconnectRoom();
+  setStatus('已返回本地模式');
+}
+
+function sendRoomMessage(type, payload = {}) {
+  if (!isRoomMode() || state.room.suppressBroadcast || state.room.remoteApplying) return;
+  if (state.room.socket.readyState !== WebSocket.OPEN) return;
+  state.room.socket.send(JSON.stringify({ type, payload }));
+}
+
+function withSuppressedRoomBroadcast(fn) {
+  state.room.suppressBroadcast = true;
+  try {
+    return fn();
+  } finally {
+    state.room.suppressBroadcast = false;
+  }
+}
+
+async function withSuppressedRoomBroadcastAsync(fn) {
+  state.room.suppressBroadcast = true;
+  try {
+    return await fn();
+  } finally {
+    state.room.suppressBroadcast = false;
+  }
+}
+
+function renderRoomPanel() {
+  const participants = Object.values(state.room.participants || {});
+  const online = participants.filter(participant => participant.online).length;
+  const connectionText = state.room.connected ? '已连接' : state.room.reconnecting ? '重连中' : '未连接';
+  if (els.roomBar) els.roomBar.hidden = !state.room.code;
+  if (els.roomCodeText) els.roomCodeText.textContent = state.room.code || '-';
+  if (els.roomParticipantsText) els.roomParticipantsText.textContent = `${online}/5`;
+  if (els.roomModeText) els.roomModeText.textContent = state.sandbox ? 'Sandbox' : 'Replay';
+  if (els.roomStatusText) els.roomStatusText.textContent = state.room.code ? `房间 ${state.room.code} · ${connectionText} · 在线 ${online}/5` : '未加入房间。';
+  if (els.roomParticipantsList) {
+    els.roomParticipantsList.innerHTML = '';
+    for (const participant of participants) {
+      const item = document.createElement('div');
+      item.className = 'compact-list-item';
+      item.innerHTML = `<strong>${escapeHtml(participant.display_name || participant.client_id || '-')}</strong><span>${participant.online ? 'online' : 'offline'} · ${participant.role || 'player'}</span>`;
+      els.roomParticipantsList.appendChild(item);
+    }
+  }
+}
+
+function broadcastPlaybackState(overrides = {}) {
+  if (!state.currentRound || state.currentTick === null || state.sandbox) return;
+  sendRoomMessage('playback_control', {
+    round_number: state.currentRound,
+    tick: state.currentTick,
+    is_playing: state.playing,
+    ...overrides,
+  });
+}
+
+function applyRoomSandbox(sandbox) {
+  if (!sandbox) return;
+  stopSandboxPlayback({ suppressBroadcast: true });
+  state.sandbox = {
+    schema_version: sandbox.schema_version || 1,
+    demo_id: sandbox.demo_id || state.demoId,
+    source_match_id: sandbox.source_match_id || state.demoId,
+    source_round_number: sandbox.source_round_number ?? sandbox.round ?? state.currentRound,
+    source_tick: sandbox.source_tick ?? sandbox.currentTick ?? state.currentTick,
+    source_frame_index: sandbox.source_frame_index ?? state.frameIndex,
+    created_at: sandbox.created_at || new Date().toISOString(),
+    dirty: false,
+    round: sandbox.round ?? sandbox.source_round_number ?? state.currentRound,
+    currentTick: sandbox.currentTick ?? sandbox.source_tick ?? state.currentTick,
+    nextUtilityThrowTick: sandbox.nextUtilityThrowTick ?? sandbox.next_utility_throw_tick ?? sandbox.nextUtilityTick ?? null,
+    playing: false,
+    playStartTime: 0,
+    playStartTick: sandbox.currentTick ?? sandbox.source_tick ?? state.currentTick,
+    rafId: null,
+    mode: 'idle',
+    selectedThrower: null,
+    selectedThrowerId: null,
+    selectedUtilityType: null,
+    menuAnchor: null,
+    awaitingUtilityLanding: false,
+    tokens: JSON.parse(JSON.stringify(sandbox.tokens || sandbox.token_positions || [])),
+    annotations: normalizedAnnotations(JSON.parse(JSON.stringify(sandbox.annotations || []))),
+    planned_utilities: (sandbox.planned_utilities || []).map(utility => normalizeUtilityEvent(utility, 'sandbox')),
+  };
+  state.activeMapTool = 'move';
+  if (sandbox.playing) playSandbox({ suppressBroadcast: true });
+}
+
+function exitSandboxLocal() {
+  if (!state.sandbox) return;
+  stopSandboxPlayback({ suppressBroadcast: true });
+  closeUtilityMenu();
+  state.sandbox = null;
+  state.drag = null;
+  state.arrowDraft = null;
+  state.brushDraft = null;
+  state.laserPoint = null;
+  state.remoteCursors.clear();
+  state.selectedUtility = null;
+  state.activeMapTool = 'select';
+  renderUtilityDetail();
+  updateSandboxButtons();
+  updateNavigationButtons();
+  updateMapToolbar();
+  renderSideLists();
+  draw();
+}
+
+function applyRemoteTokenMove(payload) {
+  if (!state.sandbox || !payload) return;
+  const tokenId = String(payload.token_id || payload.steamid || payload.id || '');
+  const token = (state.sandbox.tokens || []).find(item => String(item.steamid || item.id || item.name) === tokenId);
+  if (!token) return;
+  if (payload.radar_x !== undefined) token.radar_x = payload.radar_x;
+  if (payload.radar_y !== undefined) token.radar_y = payload.radar_y;
+  if (payload.currentTick !== undefined) state.sandbox.currentTick = payload.currentTick;
+}
+
+function annotationId(prefix = 'ann') {
+  return `${prefix}_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+}
+
+function normalizeAnnotation(annotation) {
+  if (!annotation || typeof annotation !== 'object') return null;
+  return {
+    ...annotation,
+    id: annotation.id || annotation.annotation_id || annotationId(annotation.type || 'ann'),
+  };
+}
+
+function normalizedAnnotations(annotations) {
+  return (annotations || []).map(normalizeAnnotation).filter(Boolean);
+}
+
+function appendRemoteObject(object) {
+  if (!state.sandbox || !object) return;
+  const normalized = normalizeAnnotation(object);
+  if (!normalized) return;
+  state.sandbox.annotations.push(normalized);
+}
+
+function deleteRemoteObject(objectId) {
+  if (!state.sandbox || !objectId) return;
+  state.sandbox.annotations = (state.sandbox.annotations || []).filter(annotation => annotation.id !== objectId);
+}
+
+function applyRemoteCursor(clientId, payload = {}) {
+  if (!clientId || clientId === state.room.clientId || payload.tool !== 'laser') return;
+  const x = Number(payload.radar_x);
+  const y = Number(payload.radar_y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  state.remoteCursors.set(clientId, { x, y, displayName: payload.display_name || clientId, updatedAt: performance.now() });
+  draw();
+}
+
+function appendRemoteUtility(utility, currentTickValue, nextUtilityThrowTick) {
+  if (!state.sandbox || !utility) return;
+  state.sandbox.planned_utilities.push(normalizeUtilityEvent(utility, 'sandbox'));
+  if (currentTickValue !== undefined && state.sandbox.playing) state.sandbox.currentTick = currentTickValue;
+  state.sandbox.nextUtilityThrowTick = nextUtilityThrowTick ?? utility.detonate_tick ?? sandboxUtilityPlanningTick(state.sandbox);
+}
+
+function roomTokenPayload(token) {
+  return {
+    token_id: String(token?.steamid || token?.id || token?.name || ''),
+    radar_x: token?.radar_x,
+    radar_y: token?.radar_y,
+    currentTick: state.sandbox?.currentTick,
+  };
+}
+
+function broadcastSandboxTime() {
+  if (!state.sandbox) return;
+  sendRoomMessage('sandbox_time_control', {
+    currentTick: state.sandbox.currentTick,
+    playing: Boolean(state.sandbox.playing),
+  });
 }
 
 function buildReplayIndex(manifest) {
@@ -621,6 +1406,21 @@ function getUtilityOpacityByTick(utility, tick) {
   return 1;
 }
 
+function sandboxUtilityPlanningTick(sandbox) {
+  if (!sandbox) return null;
+  const explicitTick = toFiniteNumber(sandbox.nextUtilityThrowTick ?? sandbox.next_utility_throw_tick);
+  if (Number.isFinite(explicitTick)) return explicitTick;
+  const utilityTicks = (sandbox.planned_utilities || [])
+    .map(utility => toFiniteNumber(utility.detonate_tick) ?? toFiniteNumber(utility.throw_tick))
+    .filter(Number.isFinite);
+  if (utilityTicks.length) return Math.max(...utilityTicks);
+  return toFiniteNumber(sandbox.source_tick) ?? toFiniteNumber(sandbox.currentTick) ?? toFiniteNumber(state.currentTick);
+}
+
+function isPausedSandboxUtility(utility) {
+  return Boolean(state.sandbox && !state.sandbox.playing && utility?.source === 'sandbox');
+}
+
 function loadRadarImage(url) {
   return new Promise((resolve, reject) => {
     state.radarImage.onload = resolve;
@@ -706,7 +1506,8 @@ async function switchToRound(roundNumber, options = {}) {
     els.timeline.max = Math.max(0, (roundData.frames || []).length - 1);
     updateViewStateFromTick(targetRound, state.currentTick);
     setStatus('已加载');
-    if (autoplay) play();
+    if (autoplay) play({ suppressBroadcast: options.suppressBroadcast });
+    if (!options.suppressBroadcast) broadcastPlaybackState({ round_number: targetRound, tick: state.currentTick, is_playing: autoplay });
     return true;
   } catch (err) {
     console.error(err);
@@ -723,6 +1524,9 @@ function confirmExitSandbox() {
   state.sandbox = null;
   state.drag = null;
   state.arrowDraft = null;
+  state.brushDraft = null;
+  state.laserPoint = null;
+  state.remoteCursors.clear();
   state.activeMapTool = 'select';
   updateSandboxButtons();
   updateMapToolbar();
@@ -758,6 +1562,7 @@ function seekToTick(targetTick, options = {}) {
   state.frameIndex = getNearestFrameIndex(state.currentRound, tick);
   updateViewStateFromTick(state.currentRound, tick, { skipDraw: true, lightweight: keepPlaying });
   if (!keepPlaying) draw();
+  if (!keepPlaying && !options.suppressBroadcast) broadcastPlaybackState({ tick, is_playing: state.playing });
 }
 
 function updateViewStateFromTick(roundNumber, tick, options = {}) {
@@ -773,18 +1578,20 @@ function updateViewStateFromTick(roundNumber, tick, options = {}) {
   if (!options.skipDraw) draw();
 }
 
-function play() {
+function play(options = {}) {
   if (!state.roundData || state.sandbox || state.currentTick === null) return;
-  pause({ redraw: false });
+  pause({ redraw: false, suppressBroadcast: true });
   state.playing = true;
   state.playStartTime = performance.now();
   state.playStartTick = state.currentTick;
   updateNavigationButtons();
   state.rafId = requestAnimationFrame(loop);
   draw();
+  if (!options.suppressBroadcast) broadcastPlaybackState({ is_playing: true });
 }
 
 function pause(options = {}) {
+  const wasPlaying = state.playing;
   state.playing = false;
   if (state.rafId !== null) {
     cancelAnimationFrame(state.rafId);
@@ -792,6 +1599,7 @@ function pause(options = {}) {
   }
   updateNavigationButtons();
   if (options.redraw !== false) draw();
+  if (wasPlaying && !options.suppressBroadcast) broadcastPlaybackState({ is_playing: false });
 }
 
 function loop(now) {
@@ -871,7 +1679,7 @@ async function jumpToFinding(finding) {
 
 function renderFindings() {
   els.findingsList.innerHTML = '';
-  const findings = state.manifest?.findings || [];
+  const findings = filteredFindings();
   for (const finding of findings) {
     const div = document.createElement('div');
     div.className = `finding-card ${finding.sentiment || ''} ${finding.finding_id === state.activeFindingId ? 'active' : ''}`;
@@ -914,7 +1722,7 @@ function renderPlayersList() {
   if (!els.playersList) return;
   els.playersList.innerHTML = '';
   const frame = currentFrame();
-  for (const player of frame?.players || []) {
+  for (const player of filteredPlayers(frame?.players || [])) {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = `compact-list-item player ${player.team || ''}`;
@@ -938,7 +1746,7 @@ function renderSandboxObjectsList() {
   }
   const objects = [
     ...(state.sandbox.planned_utilities || []).map(utility => ({ type: 'utility', label: utilityLabel(utility.type), detail: `tick ${utility.detonate_tick ?? '-'}`, ref: utility })),
-    ...(state.sandbox.annotations || []).map((ann, idx) => ({ type: ann.type, label: ann.type === 'arrow' ? '箭头' : '文字', detail: ann.text || `#${idx + 1}`, ref: ann })),
+    ...(state.sandbox.annotations || []).map((ann, idx) => ({ type: ann.type, label: ann.type === 'arrow' ? '箭头' : ann.type === 'brush' ? '画笔' : '文字', detail: ann.text || `${ann.points?.length || ''} #${idx + 1}`, ref: ann })),
   ];
   for (const object of objects) {
     const item = document.createElement('button');
@@ -949,6 +1757,12 @@ function renderSandboxObjectsList() {
       item.addEventListener('click', () => {
         state.selectedUtility = object.ref;
         renderUtilityDetail();
+        draw();
+      });
+    } else {
+      item.addEventListener('click', () => {
+        state.selectedUtility = null;
+        els.utilityDetail.textContent = `${object.label} · ${object.detail}`;
         draw();
       });
     }
@@ -977,6 +1791,7 @@ function renderMarkers() {
   const markers = state.replayIndex?.markersByRound.get(Number(state.currentRound)) || [];
   for (const marker of markers) {
     if (marker.type?.startsWith('utility') && (!state.filters.showUtilities || !state.filters.types[marker.utility_type])) continue;
+    if (!markerMatchesFilters(marker)) continue;
     const x = Math.max(0, Math.min(els.markerCanvas.width - 1, ((marker.tick - start) / span) * els.markerCanvas.width));
     markerCtx.strokeStyle = markerColor(marker);
     markerCtx.beginPath();
@@ -1007,9 +1822,170 @@ function currentTick() {
   return state.currentTick ?? currentFrame()?.tick ?? null;
 }
 
-function currentUtilities() {
+function currentUtilities(options = {}) {
   if (!state.roundData || !state.filters.showUtilities) return [];
-  return (state.roundData.utility_events || []).filter(utility => state.filters.types[utility.type] !== false);
+  const utilities = (state.roundData.utility_events || []).filter(utility => state.filters.types[utility.type] !== false);
+  return options.forOverlay ? utilities : filteredUtilities(utilities);
+}
+
+function refreshAnalysisFilterViews() {
+  renderFindings();
+  renderSideLists();
+  renderMarkers();
+  draw();
+}
+
+function clearAnalysisFilters() {
+  state.analysisFilters.side = 'all';
+  state.analysisFilters.playerId = 'all';
+  state.analysisFilters.severity = 'all';
+  state.analysisFilters.visualMode = 'highlight';
+  for (const key of Object.keys(state.analysisFilters.findingTypes)) state.analysisFilters.findingTypes[key] = true;
+  if (els.filterSide) els.filterSide.value = 'all';
+  if (els.filterPlayer) els.filterPlayer.value = 'all';
+  if (els.filterSeverity) els.filterSeverity.value = 'all';
+  if (els.filterVisualMode) els.filterVisualMode.value = 'highlight';
+  for (const input of els.findingTypeFilters || []) input.checked = true;
+  refreshAnalysisFilterViews();
+}
+
+function refreshPlayerFilterOptions() {
+  if (!els.filterPlayer) return;
+  const selected = state.analysisFilters.playerId;
+  const players = new Map();
+  for (const player of state.manifest?.players || []) {
+    const key = normalizePlayerKey(player.steamid || player.name);
+    if (key) players.set(key, player.name || player.steamid || key);
+  }
+  els.filterPlayer.innerHTML = '<option value="all">全部</option>';
+  for (const [key, label] of players.entries()) {
+    const option = document.createElement('option');
+    option.value = key;
+    option.textContent = label;
+    if (key === selected) option.selected = true;
+    els.filterPlayer.appendChild(option);
+  }
+}
+
+function filteredFindings() {
+  return (state.manifest?.findings || []).filter(matchesFindingFilter);
+}
+
+function filteredUtilities(utilities) {
+  return (utilities || []).filter(matchesUtilityFilter);
+}
+
+function filteredPlayers(players) {
+  return (players || []).filter(player => analysisItemDisplay(player, 'player').visibleInList);
+}
+
+function normalizePlayerKey(value) {
+  const text = String(value ?? '').trim();
+  return text || null;
+}
+
+function findingTypeAliases(type) {
+  const normalized = String(type || '').toLowerCase();
+  const aliases = new Set([normalized]);
+  if (normalized.includes('trade')) aliases.add('trade_failure').add('trade_fail');
+  if (normalized.includes('entry') && normalized.includes('success')) aliases.add('entry_success');
+  if (normalized.includes('entry') && (normalized.includes('fail') || normalized.includes('failure'))) aliases.add('entry_failure').add('entry_failed');
+  if (normalized.includes('stall')) aliases.add('stall');
+  if (normalized.includes('postplant') || normalized.includes('post_plant')) aliases.add('postplant_loss').add('postplant');
+  return aliases;
+}
+
+function findingPlayerKeys(finding) {
+  const keys = new Set();
+  for (const player of finding.players || []) {
+    if (typeof player === 'object') {
+      const key = normalizePlayerKey(player.steamid || player.player_id || player.name);
+      if (key) keys.add(key);
+    } else {
+      const key = normalizePlayerKey(player);
+      if (key) keys.add(key);
+    }
+  }
+  const evidence = finding.evidence || {};
+  for (const value of Object.values(evidence)) {
+    if (typeof value === 'string' || typeof value === 'number') {
+      const key = normalizePlayerKey(value);
+      if (key) keys.add(key);
+    }
+  }
+  return keys;
+}
+
+function findingSide(finding) {
+  return normalizeSide(finding.team || finding.side);
+}
+
+function utilityPlayerKey(utility) {
+  return normalizePlayerKey(utility.thrower_player_id || utility.thrower_steamid || utility.thrower);
+}
+
+function matchesSide(side) {
+  return state.analysisFilters.side === 'all' || normalizeSide(side) === state.analysisFilters.side;
+}
+
+function playerAliasSet(playerOrKey) {
+  const aliases = new Set();
+  if (playerOrKey && typeof playerOrKey === 'object') {
+    for (const value of [playerOrKey.steamid, playerOrKey.name, playerOrKey.player_id]) {
+      const key = normalizePlayerKey(value);
+      if (key) aliases.add(key);
+    }
+  } else {
+    const key = normalizePlayerKey(playerOrKey);
+    if (key) aliases.add(key);
+  }
+  return aliases;
+}
+
+function matchesPlayer(keySetOrKey) {
+  const target = state.analysisFilters.playerId;
+  if (target === 'all') return true;
+  if (keySetOrKey instanceof Set) return keySetOrKey.has(target);
+  if (keySetOrKey && typeof keySetOrKey === 'object') return playerAliasSet(keySetOrKey).has(target);
+  return normalizePlayerKey(keySetOrKey) === target;
+}
+
+function matchesFindingFilter(finding) {
+  if (!matchesSide(findingSide(finding))) return false;
+  if (!matchesPlayer(findingPlayerKeys(finding))) return false;
+  const severity = String(finding.severity || '').toLowerCase();
+  if (state.analysisFilters.severity !== 'all' && severity !== state.analysisFilters.severity) return false;
+  const aliases = findingTypeAliases(finding.finding_type);
+  return Array.from(aliases).some(type => state.analysisFilters.findingTypes[type] !== false);
+}
+
+function matchesUtilityFilter(utility) {
+  if (!matchesSide(resolveUtilitySide(utility))) return false;
+  if (!matchesPlayer(utilityPlayerKey(utility))) return false;
+  return true;
+}
+
+function markerMatchesFilters(marker) {
+  if (marker.type === 'finding') {
+    const findingId = marker.payload?.finding_id;
+    const finding = (state.manifest?.findings || []).find(item => item.finding_id === findingId);
+    return finding ? matchesFindingFilter(finding) : true;
+  }
+  if (marker.type?.startsWith('utility')) {
+    const utilities = state.replayIndex?.utilitiesByRound.get(Number(marker.round_number)) || [];
+    const utility = utilities.find(item => item.id === marker.utility_id || Number(item.detonate_tick ?? item.throw_tick) === Number(marker.tick));
+    return utility ? matchesUtilityFilter(utility) : true;
+  }
+  return matchesSide(marker.team || marker.side);
+}
+
+function analysisItemDisplay(item, kind) {
+  const mode = state.analysisFilters.visualMode;
+  const matches = kind === 'utility' ? matchesUtilityFilter(item) : kind === 'player' ? (matchesSide(item.team || item.side) && matchesPlayer(item)) : true;
+  if (matches) return { visible: true, visibleInList: true, alpha: 1, highlight: mode === 'highlight' && (state.analysisFilters.side !== 'all' || state.analysisFilters.playerId !== 'all') };
+  if (mode === 'hide_others') return { visible: false, visibleInList: false, alpha: 0, highlight: false };
+  if (mode === 'ghost_others') return { visible: true, visibleInList: false, alpha: 0.22, highlight: false };
+  return { visible: true, visibleInList: false, alpha: 0.45, highlight: false };
 }
 
 function drawEmpty() {
@@ -1041,7 +2017,7 @@ function draw() {
 
   const tick = currentTick();
   if (!state.sandbox && tick !== null) {
-    drawUtilityEvents(tick, currentUtilities());
+    drawUtilityEvents(tick, currentUtilities({ forOverlay: true }));
   }
 
   const frame = currentFrame();
@@ -1079,14 +2055,20 @@ function drawUtilityEvents(tick, utilities) {
 
 function drawUtilityEvent(context, utility, tick, options) {
   if (!utility || options.types[utility.type] === false) return;
-  if (options.showUtilityEffects) {
+  const display = analysisItemDisplay(utility, 'utility');
+  if (!display.visible) return;
+  const pausedSandboxUtility = isPausedSandboxUtility(utility);
+  context.save();
+  context.globalAlpha *= display.alpha;
+  if (options.showUtilityEffects && !pausedSandboxUtility) {
     if (utility.type === 'flashbang' && options.showFlashBurst) drawFlashBurst(context, utility, tick);
     if (utility.type === 'hegrenade' && options.showHeBlast) drawHeBlast(context, utility, tick);
     if (utility.type === 'smoke' && options.showSmokeRange) drawSmokeCloud(context, utility, tick);
     if (utility.type === 'molotov' && options.showMolotovRange) drawMolotovFire(context, utility, tick);
     if (utility.type === 'decoy') drawSimpleUtilityArea(context, utility, tick);
   }
-  if (options.showUtilityTrajectories) drawUtilityTrajectory(context, utility, tick);
+  if (options.showUtilityTrajectories) drawUtilityTrajectory(context, utility, tick, { forceFull: pausedSandboxUtility });
+  context.restore();
 }
 
 function drawFlashBurst(context, utility, tick) {
@@ -1354,21 +2336,22 @@ function stableHash(value) {
   return hash >>> 0;
 }
 
-function drawUtilityTrajectory(context, utility, tick) {
+function drawUtilityTrajectory(context, utility, tick, options = {}) {
   const fadeTicks = secondsToTicks(3);
   const throwTick = toFiniteNumber(utility.throw_tick) ?? toFiniteNumber(utility.trajectory?.[0]?.tick);
   const detonateTick = toFiniteNumber(utility.detonate_tick) ?? toFiniteNumber(utility.trajectory?.at(-1)?.tick);
+  const forceFull = Boolean(options.forceFull);
   if (!Number.isFinite(throwTick) || !Number.isFinite(detonateTick)) return;
   const fadeEnd = detonateTick + fadeTicks;
-  if (tick < throwTick || tick > fadeEnd) return;
-  const points = visibleTrajectoryPoints(utility, tick);
+  if (!forceFull && (tick < throwTick || tick > fadeEnd)) return;
+  const points = forceFull ? (utility.trajectory || []) : visibleTrajectoryPoints(utility, tick);
   if (points.length === 0) return;
   const style = utilityStyle[utility.type] || utilityStyle.flashbang;
   context.save();
   context.strokeStyle = style.color;
   context.fillStyle = style.color;
   context.lineWidth = utility.id === state.selectedUtility?.id ? 4 : 2;
-  context.globalAlpha = tick <= detonateTick ? 0.9 : Math.max(0.2, 1 - ((tick - detonateTick) / fadeTicks));
+  context.globalAlpha = forceFull ? 0.9 : (tick <= detonateTick ? 0.9 : Math.max(0.2, 1 - ((tick - detonateTick) / fadeTicks)));
   if (utility.approximate_trajectory) context.setLineDash([8, 6]);
   context.beginPath();
   points.forEach((point, idx) => {
@@ -1400,6 +2383,8 @@ function visibleTrajectoryPoints(utility, tick) {
 function drawTokens(tokens, editable, tick, frame = null, prevFrame = null) {
   const blinded = blindedSteamidsAtTick(tick);
   for (const token of tokens) {
+    const display = analysisItemDisplay(token, 'player');
+    if (!display.visible) continue;
     const x = Number(token.radar_x);
     const y = Number(token.radar_y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
@@ -1407,11 +2392,11 @@ function drawTokens(tokens, editable, tick, frame = null, prevFrame = null) {
     const alive = token.is_alive !== false && health > 0;
     const blindInfo = blinded.get(String(token.steamid));
     ctx.save();
-    ctx.globalAlpha = alive ? 1 : 0.35;
+    ctx.globalAlpha = (alive ? 1 : 0.35) * display.alpha;
     if (blindInfo && state.filters.showBlindHalo) drawBlindHalo(x, y, editable ? 13 : 11, blindInfo.intensity);
     ctx.fillStyle = alive ? (token.team === 'T' ? '#fbbf24' : '#60a5fa') : '#6b7280';
-    ctx.strokeStyle = blindInfo ? '#ffffff' : '#111827';
-    ctx.lineWidth = blindInfo ? 3 + 4 * blindInfo.intensity : 3;
+    ctx.strokeStyle = display.highlight ? '#ffffff' : blindInfo ? '#ffffff' : '#111827';
+    ctx.lineWidth = display.highlight ? 5 : blindInfo ? 3 + 4 * blindInfo.intensity : 3;
     ctx.beginPath();
     ctx.arc(x, y, editable ? 13 : 11, 0, Math.PI * 2);
     ctx.fill();
@@ -1575,6 +2560,7 @@ async function enterSandbox() {
     dirty: false,
     round: state.currentRound,
     currentTick: frame.tick,
+    nextUtilityThrowTick: sandboxUtilityPlanningTick({ source_tick: frame.tick, currentTick: frame.tick, planned_utilities: plannedUtilities }),
     playing: false,
     playStartTime: 0,
     playStartTick: frame.tick,
@@ -1595,6 +2581,9 @@ async function enterSandbox() {
   updateMapToolbar();
   renderSideLists();
   draw();
+  if (!state.room.suppressBroadcast) {
+    sendRoomMessage('enter_sandbox', { sandbox: sandboxPayload() });
+  }
 }
 
 async function loadMatchingSandboxUtilities(roundNumber, sourceTick) {
@@ -1614,11 +2603,39 @@ function drawSandbox() {
   const tick = state.sandbox.currentTick ?? state.sandbox.source_tick;
   drawUtilityEvents(tick, state.sandbox.planned_utilities || []);
   drawTokens(state.sandbox.tokens, true, tick, currentFrame(), previousFrame());
-  for (const ann of state.sandbox.annotations) {
-    if (ann.type === 'arrow') drawArrow(ann.from[0], ann.from[1], ann.to[0], ann.to[1], '#22c55e');
-    if (ann.type === 'text') drawTextNote(ann.position[0], ann.position[1], ann.text);
-  }
+  for (const ann of state.sandbox.annotations) drawAnnotation(ann);
   if (state.arrowDraft) drawArrow(state.arrowDraft.from[0], state.arrowDraft.from[1], state.arrowDraft.to[0], state.arrowDraft.to[1], '#f97316');
+  if (state.brushDraft) drawBrushStroke(state.brushDraft, { alpha: 0.9 });
+  if (state.laserPoint) drawLaserPoint(state.laserPoint, '你');
+  drawRemoteCursors();
+}
+
+function drawAnnotation(ann) {
+  if (!ann) return;
+  if (ann.type === 'arrow') drawArrow(ann.from[0], ann.from[1], ann.to[0], ann.to[1], ann.color || '#22c55e');
+  if (ann.type === 'text') drawTextNote(ann.position[0], ann.position[1], ann.text);
+  if (ann.type === 'brush') drawBrushStroke(ann);
+}
+
+function drawBrushStroke(stroke, options = {}) {
+  const points = stroke.points || [];
+  if (points.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = stroke.color || '#facc15';
+  ctx.lineWidth = stroke.width || 4;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.globalAlpha = options.alpha ?? 0.82;
+  ctx.beginPath();
+  points.forEach((point, idx) => {
+    const x = Number(point.x);
+    const y = Number(point.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (idx === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawArrow(x1, y1, x2, y2, color) {
@@ -1647,9 +2664,77 @@ function drawTextNote(x, y, text) {
   ctx.fillText(text, x + 3, y - 2);
 }
 
+function drawLaserPoint(point, label) {
+  const x = Number(point.x);
+  const y = Number(point.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(248,113,113,0.95)';
+  ctx.fillStyle = 'rgba(248,113,113,0.28)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(x, y, 16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 22, y);
+  ctx.lineTo(x + 22, y);
+  ctx.moveTo(x, y - 22);
+  ctx.lineTo(x, y + 22);
+  ctx.stroke();
+  if (label) {
+    ctx.font = '13px sans-serif';
+    ctx.fillStyle = '#fecaca';
+    ctx.fillText(label, x + 18, y - 18);
+  }
+  ctx.restore();
+}
+
+function drawRemoteCursors() {
+  const now = performance.now();
+  for (const [clientId, cursor] of state.remoteCursors.entries()) {
+    if (now - cursor.updatedAt > 1800) {
+      state.remoteCursors.delete(clientId);
+      continue;
+    }
+    drawLaserPoint(cursor, cursor.displayName);
+  }
+}
+
 function currentTool() {
   if (state.sandbox) return state.activeMapTool === 'select' ? 'move' : state.activeMapTool;
   return state.activeMapTool || 'select';
+}
+
+function makeAnnotation(object) {
+  return normalizeAnnotation({ id: annotationId(object.type || 'ann'), ...object });
+}
+
+function addAnnotation(annotation) {
+  if (!state.sandbox || !annotation) return;
+  const normalized = normalizeAnnotation(annotation);
+  if (!normalized) return;
+  state.sandbox.annotations.push(normalized);
+  sendRoomMessage('create_object', { object: normalized });
+  markSandboxDirty();
+  renderSideLists();
+}
+
+function removeAnnotation(annotation) {
+  if (!state.sandbox || !annotation?.id) return;
+  state.sandbox.annotations = (state.sandbox.annotations || []).filter(item => item.id !== annotation.id);
+  sendRoomMessage('delete_object', { object_id: annotation.id });
+  markSandboxDirty();
+  renderSideLists();
+}
+
+function sendLaserCursor(point) {
+  const now = performance.now();
+  state.laserPoint = { x: round2(point.x), y: round2(point.y) };
+  if (now - state.room.lastCursorSentAt > 35) {
+    state.room.lastCursorSentAt = now;
+    sendRoomMessage('cursor', { tool: 'laser', radar_x: state.laserPoint.x, radar_y: state.laserPoint.y, display_name: state.room.joinProfile?.display_name || 'laser' });
+  }
 }
 
 function onCanvasDown(evt) {
@@ -1672,9 +2757,24 @@ function onCanvasDown(evt) {
       state.arrowDraft = { from: [point.x, point.y], to: [point.x, point.y] };
       return;
     }
+    if (tool === 'brush') {
+      state.brushDraft = { type: 'brush', points: [{ x: round2(point.x), y: round2(point.y) }], color: '#facc15', width: 4 };
+      return;
+    }
+    if (tool === 'eraser') {
+      const annotation = hitAnnotation(point.x, point.y);
+      if (annotation) removeAnnotation(annotation);
+      draw();
+      return;
+    }
+    if (tool === 'laser') {
+      sendLaserCursor(point);
+      draw();
+      return;
+    }
     if (tool === 'text') return;
   }
-  if (tool === 'pan' || !state.sandbox || (state.sandbox && tool !== 'arrow' && tool !== 'text')) {
+  if (tool === 'pan' || !state.sandbox || (state.sandbox && !['arrow', 'text', 'brush', 'eraser', 'laser'].includes(tool))) {
     state.viewportDrag = { screenX: screen.x, screenY: screen.y };
   }
 }
@@ -1691,11 +2791,34 @@ function onCanvasMove(evt) {
       syncSandboxUtilityMenu();
     }
     markSandboxDirty();
+    const now = performance.now();
+    if (now - state.room.lastMoveSentAt > 45) {
+      state.room.lastMoveSentAt = now;
+      sendRoomMessage('move_token', roomTokenPayload(state.drag.token));
+    }
     draw();
     return;
   }
   if (state.arrowDraft && state.sandbox) {
     state.arrowDraft.to = [point.x, point.y];
+    draw();
+    return;
+  }
+  if (state.brushDraft && state.sandbox) {
+    const points = state.brushDraft.points;
+    const last = points[points.length - 1];
+    if (!last || distance(point.x, point.y, last.x, last.y) > 2) points.push({ x: round2(point.x), y: round2(point.y) });
+    draw();
+    return;
+  }
+  if (state.sandbox && currentTool() === 'eraser' && state.pointerDown) {
+    const annotation = hitAnnotation(point.x, point.y);
+    if (annotation) removeAnnotation(annotation);
+    draw();
+    return;
+  }
+  if (state.sandbox && currentTool() === 'laser' && state.pointerDown) {
+    sendLaserCursor(point);
     draw();
     return;
   }
@@ -1707,14 +2830,20 @@ function onCanvasMove(evt) {
 
 function onCanvasUp(evt) {
   if (state.arrowDraft && state.sandbox) {
-    state.sandbox.annotations.push({
+    const arrow = makeAnnotation({
       type: 'arrow',
       from: [round2(state.arrowDraft.from[0]), round2(state.arrowDraft.from[1])],
       to: [round2(state.arrowDraft.to[0]), round2(state.arrowDraft.to[1])],
     });
+    addAnnotation(arrow);
     state.arrowDraft = null;
-    markSandboxDirty();
   }
+  if (state.brushDraft && state.sandbox) {
+    if ((state.brushDraft.points || []).length > 1) addAnnotation(makeAnnotation(state.brushDraft));
+    state.brushDraft = null;
+  }
+  if (state.laserPoint && currentTool() === 'laser') state.laserPoint = null;
+  if (state.drag && state.sandbox) sendRoomMessage('move_token', roomTokenPayload(state.drag.token));
   state.drag = null;
   state.viewportDrag = null;
   draw();
@@ -1745,7 +2874,7 @@ function onCanvasDblClick(evt) {
   if (!state.sandbox || state.sandbox.mode === 'select_landing') return;
   const point = canvasRadarPoint(evt);
   const token = hitToken(point.x, point.y);
-  if (token) {
+  if (token && ['move', 'utility'].includes(currentTool())) {
     openUtilityMenu(token);
     draw();
   }
@@ -1760,8 +2889,7 @@ function handleSandboxClick(point) {
   if (currentTool() === 'text') {
     const text = prompt('备注文本');
     if (text) {
-      state.sandbox.annotations.push({ type: 'text', position: [round2(point.x), round2(point.y)], text });
-      markSandboxDirty();
+      addAnnotation(makeAnnotation({ type: 'text', position: [round2(point.x), round2(point.y)], text }));
       draw();
     }
     return;
@@ -1792,11 +2920,42 @@ function hitToken(x, y) {
   return best;
 }
 
+function hitAnnotation(x, y) {
+  if (!state.sandbox) return null;
+  const annotations = state.sandbox.annotations || [];
+  for (let idx = annotations.length - 1; idx >= 0; idx -= 1) {
+    const ann = annotations[idx];
+    if (annotationHit(ann, x, y)) return ann;
+  }
+  return null;
+}
+
+function annotationHit(ann, x, y) {
+  const threshold = 16 / Math.max(state.viewport.zoom, 0.001);
+  if (ann.type === 'brush') return (ann.points || []).some((point, idx, points) => idx > 0 && distanceToSegment(x, y, points[idx - 1], point) <= threshold);
+  if (ann.type === 'arrow') return distanceToSegment(x, y, { x: ann.from?.[0], y: ann.from?.[1] }, { x: ann.to?.[0], y: ann.to?.[1] }) <= threshold;
+  if (ann.type === 'text') return distance(x, y, Number(ann.position?.[0]), Number(ann.position?.[1])) <= Math.max(24, threshold);
+  return false;
+}
+
+function distanceToSegment(x, y, a, b) {
+  const ax = Number(a?.x ?? a?.[0]);
+  const ay = Number(a?.y ?? a?.[1]);
+  const bx = Number(b?.x ?? b?.[0]);
+  const by = Number(b?.y ?? b?.[1]);
+  if (![ax, ay, bx, by].every(Number.isFinite)) return Infinity;
+  const dx = bx - ax;
+  const dy = by - ay;
+  if (dx === 0 && dy === 0) return distance(x, y, ax, ay);
+  const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)));
+  return distance(x, y, ax + t * dx, ay + t * dy);
+}
+
 function hitUtility(x, y) {
   let best = null;
   let bestDist = Infinity;
   const tick = state.sandbox ? state.sandbox.currentTick : currentTick();
-  const utilities = state.sandbox ? (state.sandbox.planned_utilities || []) : currentUtilities();
+  const utilities = state.sandbox ? (state.sandbox.planned_utilities || []) : currentUtilities({ forOverlay: true });
   for (const utility of utilities) {
     const effect = utility.effect || {};
     const effectPos = effect.radar_pos || utility.radar_detonate_pos;
@@ -1866,6 +3025,10 @@ function closeUtilityMenu() {
 function handleSandboxEscape() {
   if (!state.sandbox) return;
   if (state.sandbox.mode !== 'idle' || state.sandbox.selectedUtilityType || state.sandbox.selectedThrower) cancelSandboxUtilitySelection();
+  state.arrowDraft = null;
+  state.brushDraft = null;
+  state.laserPoint = null;
+  draw();
 }
 
 function onSandboxUtilityMenuClick(evt) {
@@ -1913,7 +3076,9 @@ function onMapClickForUtilityLanding(point) {
 function clearSandboxUtilities() {
   if (!state.sandbox) return;
   state.sandbox.planned_utilities = [];
+  state.sandbox.nextUtilityThrowTick = state.sandbox.source_tick;
   state.selectedUtility = null;
+  sendRoomMessage('clear_utilities', {});
   markSandboxDirty();
   renderUtilityDetail();
   renderSideLists();
@@ -1924,7 +3089,7 @@ function addSandboxUtility(point) {
   const thrower = state.sandbox.selectedThrower;
   const type = state.sandbox.selectedUtilityType;
   if (!thrower || !type) return;
-  const throwTick = state.sandbox.currentTick ?? state.sandbox.source_tick;
+  const throwTick = sandboxUtilityPlanningTick(state.sandbox);
   const detonateTick = throwTick + secondsToTicks(1.2);
   const throwRadar = { x: round2(Number(thrower.radar_x)), y: round2(Number(thrower.radar_y)) };
   const detonateRadar = { x: round2(point.x), y: round2(point.y) };
@@ -1953,8 +3118,9 @@ function addSandboxUtility(point) {
     notes: '',
   }, 'sandbox');
   state.sandbox.planned_utilities.push(utility);
+  state.sandbox.nextUtilityThrowTick = detonateTick;
+  sendRoomMessage('create_utility', { utility, nextUtilityThrowTick: state.sandbox.nextUtilityThrowTick });
   renderSideLists();
-  state.sandbox.currentTick = detonateTick;
   state.sandbox.selectedUtilityType = null;
   state.sandbox.awaitingUtilityLanding = false;
   state.sandbox.mode = 'idle';
@@ -2022,28 +3188,32 @@ function radarToGame(x, y) {
 
 function toggleSandboxPlayback() {
   if (!state.sandbox) return;
-  if (state.sandbox.playing) stopSandboxPlayback();
-  else playSandbox();
+  if (state.sandbox.playing) stopSandboxPlayback({ suppressBroadcast: true });
+  else playSandbox({ suppressBroadcast: true });
   updateSandboxButtons();
+  broadcastSandboxTime();
   draw();
 }
 
-function playSandbox() {
+function playSandbox(options = {}) {
   if (!state.sandbox) return;
-  stopSandboxPlayback();
+  stopSandboxPlayback({ suppressBroadcast: true });
   state.sandbox.playing = true;
   state.sandbox.playStartTime = performance.now();
   state.sandbox.playStartTick = state.sandbox.currentTick ?? state.sandbox.source_tick;
   state.sandbox.rafId = requestAnimationFrame(sandboxLoop);
+  if (!options.suppressBroadcast) broadcastSandboxTime();
 }
 
-function stopSandboxPlayback() {
+function stopSandboxPlayback(options = {}) {
   if (!state.sandbox) return;
+  const wasPlaying = state.sandbox.playing;
   state.sandbox.playing = false;
   if (state.sandbox.rafId !== null && state.sandbox.rafId !== undefined) {
     cancelAnimationFrame(state.sandbox.rafId);
     state.sandbox.rafId = null;
   }
+  if (wasPlaying && !options.suppressBroadcast) broadcastSandboxTime();
 }
 
 function sandboxLoop(now) {
@@ -2053,7 +3223,8 @@ function sandboxLoop(now) {
   const endTick = sandboxEndTick();
   if (Number.isFinite(endTick) && state.sandbox.currentTick >= endTick) {
     state.sandbox.currentTick = endTick;
-    stopSandboxPlayback();
+    stopSandboxPlayback({ suppressBroadcast: true });
+    broadcastSandboxTime();
     updateSandboxButtons();
     draw();
     return;
@@ -2071,9 +3242,10 @@ function sandboxEndTick() {
 
 function resetSandboxTime() {
   if (!state.sandbox) return;
-  stopSandboxPlayback();
+  stopSandboxPlayback({ suppressBroadcast: true });
   state.sandbox.currentTick = state.sandbox.source_tick;
   updateSandboxButtons();
+  broadcastSandboxTime();
   draw();
 }
 
@@ -2102,20 +3274,12 @@ function renderUtilityDetail() {
 
 function resumeDemoPlayback() {
   if (!state.sandbox) return;
-  if (state.sandbox.dirty && !confirm('推演方案尚未保存，恢复播放会丢失未保存改动。继续吗？')) return;
+  if (!isRoomMode() && state.sandbox.dirty && !confirm('推演方案尚未保存，恢复播放会丢失未保存改动。继续吗？')) return;
   const round = state.sandbox.source_round_number ?? state.currentRound;
   const tick = state.sandbox.source_tick;
-  stopSandboxPlayback();
-  closeUtilityMenu();
-  state.sandbox = null;
-  state.selectedUtility = null;
-  state.activeMapTool = 'select';
-  renderUtilityDetail();
-  updateSandboxButtons();
-  updateNavigationButtons();
-  updateMapToolbar();
-  renderSideLists();
-  switchToRound(round, { tick, autoplay: true });
+  exitSandboxLocal();
+  sendRoomMessage('resume_replay', { round_number: round, tick, is_playing: true });
+  switchToRound(round, { tick, autoplay: true, suppressBroadcast: isRoomMode() });
 }
 
 function resetSandboxToSource() {
@@ -2124,7 +3288,9 @@ function resetSandboxToSource() {
   if (!sourceFrame) return;
   state.sandbox.tokens = JSON.parse(JSON.stringify(sourceFrame.players));
   state.sandbox.currentTick = state.sandbox.source_tick;
+  state.sandbox.nextUtilityThrowTick = sandboxUtilityPlanningTick(state.sandbox);
   cancelSandboxUtilitySelection();
+  sendRoomMessage('reset_sandbox_to_source', { tokens: state.sandbox.tokens, currentTick: state.sandbox.currentTick });
   markSandboxDirty();
   draw();
 }
@@ -2161,7 +3327,9 @@ function sandboxPayload() {
     notes: annotations.filter(ann => ann.type === 'text'),
     token_positions: state.sandbox.tokens,
     arrows: annotations.filter(ann => ann.type === 'arrow'),
+    brush_strokes: annotations.filter(ann => ann.type === 'brush'),
     planned_utilities: state.sandbox.planned_utilities || [],
+    nextUtilityThrowTick: state.sandbox.nextUtilityThrowTick ?? sandboxUtilityPlanningTick(state.sandbox),
     tokens: state.sandbox.tokens,
     annotations,
   };

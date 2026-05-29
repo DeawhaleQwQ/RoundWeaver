@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 import json
 import math
+import re
+import secrets
 import shutil
 
 import pandas as pd
@@ -46,6 +48,7 @@ TICK_COLUMNS = [
     "active_weapon_name",
     "has_bomb",
 ]
+ROOM_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,27 @@ def demo_output_dir(demo_id: str, paths: ProjectPaths | None = None) -> Path:
 def replay_cache_dir(demo_id: str, paths: ProjectPaths | None = None) -> Path:
     paths = paths or project_paths()
     return paths.outputs_dir / "web" / demo_id
+
+
+def rooms_dir(paths: ProjectPaths | None = None) -> Path:
+    paths = paths or project_paths()
+    return paths.outputs_dir / "rooms"
+
+
+def normalize_room_code(room_code: str) -> str:
+    code = str(room_code or "")
+    if not ROOM_CODE_PATTERN.fullmatch(code):
+        raise KeyError(f"Unknown room_code: {room_code}")
+    return code
+
+
+def room_state_path(room_code: str, paths: ProjectPaths | None = None) -> Path:
+    paths = paths or project_paths()
+    directory = rooms_dir(paths).resolve()
+    path = (directory / f"{normalize_room_code(room_code)}.json").resolve()
+    if path.parent != directory:
+        raise KeyError(f"Unknown room_code: {room_code}")
+    return path
 
 
 def ensure_replay_cache(
@@ -287,24 +311,28 @@ def build_round_frames_streamed(group: pd.DataFrame, map_cfg: Any) -> list[dict[
         players = []
         for row in tick_group.itertuples(index=False):
             row_data = row._asdict()
-            radar_x, radar_y = map_cfg.game_to_radar(float(row_data["X"]), float(row_data["Y"]))
+            x = clean_number(row_data.get("X"))
+            y = clean_number(row_data.get("Y"))
+            if x is None or y is None:
+                continue
+            radar_x, radar_y = map_cfg.game_to_radar(x, y)
             players.append(
                 {
                     "steamid": str(row_data["steamid"]),
                     "name": clean_scalar(row_data.get("name")),
                     "team": clean_scalar(row_data.get("team")),
                     "side": clean_scalar(row_data.get("side")),
-                    "x": clean_number(row_data.get("X")),
-                    "y": clean_number(row_data.get("Y")),
+                    "x": x,
+                    "y": y,
                     "z": clean_number(row_data.get("Z")),
                     "radar_x": round(radar_x, 2),
                     "radar_y": round(radar_y, 2),
                     "yaw": clean_number(row_data.get("yaw")),
                     "health": clean_int(row_data.get("health")),
                     "armor": clean_int(row_data.get("armor")),
-                    "is_alive": bool(row_data.get("is_alive")),
+                    "is_alive": clean_bool(row_data.get("is_alive")),
                     "active_weapon_name": clean_scalar(row_data.get("active_weapon_name")),
-                    "has_bomb": bool(row_data.get("has_bomb")) if row_data.get("has_bomb") is not None and not pd.isna(row_data.get("has_bomb")) else None,
+                    "has_bomb": clean_bool(row_data.get("has_bomb")),
                 }
             )
         frames.append({"tick": int(tick), "players": players})
@@ -538,6 +566,215 @@ def write_json_atomic(path: Path, data: Any) -> None:
     tmp_path.replace(path)
 
 
+def generate_room_code(paths: ProjectPaths | None = None) -> str:
+    paths = paths or project_paths()
+    rooms_dir(paths).mkdir(parents=True, exist_ok=True)
+    for _ in range(100):
+        code = secrets.token_urlsafe(12)
+        if len(code) >= 10 and ROOM_CODE_PATTERN.fullmatch(code) and not room_state_path(code, paths).exists():
+            return code
+    raise RuntimeError("Could not allocate room code")
+
+
+def parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def room_last_activity_at(room: dict[str, Any]) -> datetime | None:
+    candidates = [
+        parse_iso_datetime(room.get("last_activity_at")),
+        parse_iso_datetime(room.get("updated_at")),
+        parse_iso_datetime(room.get("created_at")),
+    ]
+    participants = room.get("participants", {})
+    if isinstance(participants, dict):
+        for participant in participants.values():
+            if isinstance(participant, dict):
+                candidates.append(parse_iso_datetime(participant.get("last_seen_at")))
+    valid = [candidate for candidate in candidates if candidate is not None]
+    if valid:
+        return max(valid)
+    return parse_iso_datetime(room.get("updated_at"))
+
+
+def room_is_expired(room: dict[str, Any], idle_ttl_sec: float | None) -> bool:
+    if not idle_ttl_sec or idle_ttl_sec <= 0:
+        return False
+    now = datetime.now(timezone.utc)
+    participants = room.get("participants", {})
+    if isinstance(participants, dict):
+        for participant in participants.values():
+            if not isinstance(participant, dict) or not participant.get("online"):
+                continue
+            last_seen = parse_iso_datetime(participant.get("last_seen_at"))
+            if last_seen is None or (now - last_seen).total_seconds() <= idle_ttl_sec:
+                return False
+    last_activity = room_last_activity_at(room)
+    if last_activity is None:
+        return False
+    return (now - last_activity).total_seconds() > idle_ttl_sec
+
+
+def delete_room_state(room_code: str, paths: ProjectPaths | None = None) -> None:
+    path = room_state_path(room_code, paths)
+    if path.exists():
+        path.unlink()
+
+
+def purge_expired_rooms(paths: ProjectPaths | None = None, idle_ttl_sec: float | None = None) -> list[str]:
+    paths = paths or project_paths()
+    directory = rooms_dir(paths)
+    if not directory.exists() or not idle_ttl_sec or idle_ttl_sec <= 0:
+        return []
+    deleted = []
+    for path in directory.glob("*.json"):
+        try:
+            room = read_json(path)
+            code = normalize_room_code(room.get("room_code") or path.stem)
+        except Exception:
+            continue
+        if room_is_expired(room, idle_ttl_sec):
+            delete_room_state(code, paths)
+            deleted.append(code)
+    return deleted
+
+
+def load_room_state(room_code: str, paths: ProjectPaths | None = None, idle_ttl_sec: float | None = None) -> dict[str, Any]:
+    paths = paths or project_paths()
+    path = room_state_path(room_code, paths)
+    if not path.exists():
+        raise KeyError(f"Unknown room_code: {room_code}")
+    room = read_json(path)
+    if room_is_expired(room, idle_ttl_sec):
+        delete_room_state(room_code, paths)
+        raise KeyError(f"Unknown room_code: {room_code}")
+    return room
+
+
+def save_room_state(room: dict[str, Any], paths: ProjectPaths | None = None) -> dict[str, Any]:
+    paths = paths or project_paths()
+    code = normalize_room_code(room.get("room_code") or room.get("code"))
+    now = datetime.now(timezone.utc).isoformat()
+    state = dict(room)
+    state["room_code"] = code
+    state["updated_at"] = now
+    state.setdefault("created_at", now)
+    state.setdefault("last_activity_at", state.get("created_at") or now)
+    rooms_dir(paths).mkdir(parents=True, exist_ok=True)
+    write_json_atomic(room_state_path(code, paths), state)
+    return state
+
+
+def list_room_states(paths: ProjectPaths | None = None, idle_ttl_sec: float | None = None) -> list[dict[str, Any]]:
+    paths = paths or project_paths()
+    purge_expired_rooms(paths, idle_ttl_sec)
+    directory = rooms_dir(paths)
+    if not directory.exists():
+        return []
+    rooms = []
+    for path in sorted(directory.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            room = read_json(path)
+            code = normalize_room_code(room.get("room_code") or path.stem)
+        except Exception:
+            continue
+        if room_is_expired(room, idle_ttl_sec):
+            delete_room_state(code, paths)
+            continue
+        participants = room.get("participants", {})
+        online = sum(1 for participant in participants.values() if participant.get("online")) if isinstance(participants, dict) else 0
+        rooms.append(
+            {
+                "room_code": code,
+                "title": room.get("title"),
+                "demo_id": room.get("demo_id"),
+                "mode": room.get("mode", "replay"),
+                "version": room.get("version", 0),
+                "created_at": room.get("created_at"),
+                "updated_at": room.get("updated_at"),
+                "last_activity_at": room.get("last_activity_at"),
+                "online_count": online,
+                "participant_count": len(participants) if isinstance(participants, dict) else 0,
+            }
+        )
+    return rooms
+
+
+def create_room_state(
+    demo_id: str,
+    round_number: int | None = None,
+    tick: int | None = None,
+    title: str | None = None,
+    paths: ProjectPaths | None = None,
+) -> dict[str, Any]:
+    paths = paths or project_paths()
+    resolve_demo_path(demo_id, paths)
+    manifest_path = ensure_replay_cache(demo_id, paths=paths)
+    manifest = read_json(manifest_path)
+    rounds = manifest.get("rounds", [])
+    if not rounds:
+        raise KeyError(f"No rounds for demo_id: {demo_id}")
+    indexed_rounds = {to_int(row.get("round")): row for row in rounds if to_int(row.get("round")) is not None}
+    selected_round = to_int(round_number) if round_number is not None else next(iter(indexed_rounds))
+    if selected_round not in indexed_rounds:
+        raise KeyError(f"Unknown round_number: {round_number}")
+    round_path = replay_cache_dir(demo_id, paths) / "rounds" / f"{selected_round}.json"
+    if not round_path.exists():
+        raise KeyError(f"Round not found: {selected_round}")
+    round_state = read_json(round_path)
+    frames = round_state.get("frames", [])
+    first_tick = to_int(frames[0].get("tick")) if frames else to_int(round_state.get("start_tick"))
+    last_tick = to_int(frames[-1].get("tick")) if frames else to_int(round_state.get("end_tick"))
+    selected_tick = to_int(tick) if tick is not None else first_tick
+    if selected_tick is None:
+        selected_tick = 0
+    if first_tick is not None and selected_tick < first_tick:
+        selected_tick = first_tick
+    if last_tick is not None and selected_tick > last_tick:
+        selected_tick = last_tick
+    now = datetime.now(timezone.utc).isoformat()
+    room = {
+        "schema_version": 1,
+        "room_code": generate_room_code(paths),
+        "title": title or f"{demo_id} R{selected_round}",
+        "demo_id": demo_id,
+        "mode": "replay",
+        "version": 1,
+        "created_at": now,
+        "updated_at": now,
+        "playback": {
+            "round_number": selected_round,
+            "tick": selected_tick,
+            "is_playing": False,
+            "updated_at": now,
+            "server_time_ms": None,
+        },
+        "sandbox": {
+            "active": False,
+            "source_round_number": selected_round,
+            "source_tick": selected_tick,
+            "source_frame_index": 0,
+            "currentTick": selected_tick,
+            "playing": False,
+            "tokens": [],
+            "annotations": [],
+            "planned_utilities": [],
+        },
+        "participants": {},
+        "settings": {"max_participants": 5},
+    }
+    return save_room_state(room, paths)
+
+
 def save_sandbox_state(demo_id: str, payload: dict[str, Any], paths: ProjectPaths | None = None) -> dict[str, Any]:
     paths = paths or project_paths()
     resolve_demo_path(demo_id, paths)
@@ -554,6 +791,7 @@ def save_sandbox_state(demo_id: str, payload: dict[str, Any], paths: ProjectPath
     state.setdefault("notes", [])
     state.setdefault("token_positions", state.get("tokens", []))
     state.setdefault("arrows", [ann for ann in state.get("annotations", []) if ann.get("type") == "arrow"])
+    state.setdefault("brush_strokes", [ann for ann in state.get("annotations", []) if ann.get("type") == "brush"])
     state.setdefault("planned_utilities", [])
     state.setdefault("schema_version", 1)
     state["saved_at"] = datetime.now(timezone.utc).isoformat()
@@ -607,3 +845,10 @@ def clean_int(value: Any) -> int | None:
     if value is None:
         return None
     return to_int(value)
+
+
+def clean_bool(value: Any) -> bool | None:
+    value = clean_scalar(value)
+    if value is None:
+        return None
+    return bool(value)

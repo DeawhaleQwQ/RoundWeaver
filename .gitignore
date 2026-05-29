@@ -42,8 +42,8 @@ samples/demos/*
 # Local runtime config that may hold a public tunnel/base URL
 config/app_config.local.json
 
-# Internal security review (kept out of public repo)
-docs/security_review_*.md
+# Internal docs (not published to the public repo)
+docs/
 
 # Logs
 *.log

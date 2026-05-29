@@ -99,11 +99,8 @@ config/         utility_effects.json, players.yaml, app_config.json (server/shar
 assets/         Dust2 radar image + map config
 samples/demos/  put your own .dem here (git-ignored)
 outputs/        generated artifacts (git-ignored)
-docs/           project status, structure, and update logs
 scripts/        demo field inspection helper
 ```
-
-See `docs/` for detailed status, structure, and the update log.
 
 ---
 
@@ -257,7 +254,3 @@ conda run -n cs2demo python -m cs2demo.cli render-kills samples/demos/<你的dem
 ### 明确不做
 
 不调用 LLM、不接 AstrBot、不做账号登录、不做房间密码、不做公网部署平台、不做多地图（仅 Dust2）、不做 3D、不重构 parser、不迁移 React。Sandbox / 房间数据与原始 demo replay 数据严格隔离。
-
-### 文档
-
-更详细的项目状态、结构与更新记录见 `docs/` 目录。
