@@ -91,6 +91,26 @@ In the page: pick your demo in the top dropdown, click **加载解析结果** (l
 and the replay starts. Pause and click **进入推演模式** to enter the sandbox, or
 **创建房间** to start a room and invite friends.
 
+#### 2.4 Invite friends over a public link (optional)
+
+To let friends outside your LAN join, launch with a Cloudflare quick tunnel
+(requires a locally installed `cloudflared`):
+
+```bash
+# Replace the path with your own checkout location
+PYTHONPATH=/path/to/cs2plugin conda run -n cs2demo \
+  python -m cs2demo.server --host 127.0.0.1 --port 8000 --tunnel cloudflared
+```
+
+On startup the server prints a public URL like
+`https://xxxxx.trycloudflare.com`, and the top bar shows **公网分享：cloudflared**
+in green. Create a room, copy the `https://xxxxx.trycloudflare.com/r/{room_code}`
+link, and send it to friends — WebSocket automatically uses `wss://` over HTTPS.
+
+> The public tunnel exposes the service to the internet **without
+> authentication**. Only run it on a trusted network and stop the process when
+> you are done (the quick-tunnel URL dies with it).
+
 CLI workflow (optional):
 
 ```bash
@@ -177,6 +197,25 @@ conda run -n cs2demo python -m cs2demo.server
 
 在页面里：顶部下拉框选择你的 demo，点击「加载解析结果」即可开始回放。暂停后点
 「进入推演模式」进入沙盒，或点「创建房间」开房邀请好友。
+
+#### 2.4 用公网链接邀请好友（可选）
+
+要让不在同一局域网的好友加入，用 Cloudflare quick tunnel 启动（需本机已安装
+`cloudflared`）：
+
+```bash
+# 把路径换成你自己的项目目录
+PYTHONPATH=/path/to/cs2plugin conda run -n cs2demo \
+  python -m cs2demo.server --host 127.0.0.1 --port 8000 --tunnel cloudflared
+```
+
+启动后 server 会给出形如 `https://xxxxx.trycloudflare.com` 的公网地址，页面顶部会
+显示绿色的「公网分享：cloudflared」。创建房间后复制
+`https://xxxxx.trycloudflare.com/r/{room_code}` 链接发给好友即可；HTTPS 下
+WebSocket 会自动用 `wss://`。
+
+> 公网隧道会把服务暴露到互联网且**没有身份认证**。请只在可信网络下临时启用，用完
+> 关掉进程（quick tunnel 链接会随进程一起失效）。
 
 命令行流程（可选）：
 
