@@ -187,10 +187,3 @@ conda run -n cs2demo python -m cs2demo.cli report        samples/demos/<你的de
 conda run -n cs2demo python -m cs2demo.cli export-replay samples/demos/<你的demo>.dem
 ```
 
----
-
-### 明确不做 / Out of scope
-
-不调用 LLM、不接 AstrBot、不做账号登录、不做房间密码、不做公网部署平台、不做多地图
-（仅 Dust2）、不做 3D、不重构 parser、不迁移 React。Sandbox / 房间数据与原始 demo
-replay 数据严格隔离。
