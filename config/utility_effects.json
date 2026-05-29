@@ -1,0 +1,40 @@
+{
+  "flashbang": {
+    "flash_visual_duration_sec": 0.8,
+    "flash_core_radius": 160,
+    "flash_fade_radius": 500,
+    "max_blind_duration_sec": 5.0
+  },
+  "hegrenade": {
+    "blast_visual_duration_sec": 0.7,
+    "smoke_visual_duration_sec": 2.5,
+    "damage_radius": 350,
+    "inner_radius": 120,
+    "outer_radius": 350
+  },
+  "smoke": {
+    "duration_sec": 18.0,
+    "radius": 170,
+    "fade_in_sec": 1.0,
+    "fade_out_sec": 1.5,
+    "core_color": "rgba(55, 55, 55, 0.62)",
+    "outer_color": "rgba(95, 95, 95, 0.34)",
+    "edge_color": "rgba(120, 120, 120, 0.18)",
+    "t_core_color": "rgba(255, 177, 66, 0.68)",
+    "t_outer_color": "rgba(245, 158, 11, 0.40)",
+    "t_edge_color": "rgba(251, 191, 36, 0.20)",
+    "ct_core_color": "rgba(96, 165, 250, 0.68)",
+    "ct_outer_color": "rgba(59, 130, 246, 0.40)",
+    "ct_edge_color": "rgba(147, 197, 253, 0.20)",
+    "timer_bg_color": "rgba(15, 17, 23, 0.72)",
+    "timer_fill_color": "rgba(238, 242, 247, 0.82)",
+    "timer_text_color": "rgba(255, 255, 255, 0.88)"
+  },
+  "molotov": {
+    "duration_sec": 7.0,
+    "max_duration_sec": 7.5,
+    "radius": 180,
+    "fade_in_sec": 0.5,
+    "fade_out_sec": 0.8
+  }
+}

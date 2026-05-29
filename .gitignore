@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Node / Playwright
+node_modules/
+.playwright/
+
+# Generated outputs
+outputs/
+*.parquet
+*.csv
+*.jsonl
+
+# Demo files: large binaries (often >100MB, exceeds GitHub limits) and may
+# contain match/player data. Bring your own .dem into samples/demos/.
+# The directory itself is kept (with its README); only .dem files are ignored.
+*.dem
+samples/demos/*
+!samples/demos/README.md
+
+# Local/editor files
+.env
+.env.*
+!.env.example
+.DS_Store
+.vscode/
+.idea/
+
+# Local runtime config that may hold a public tunnel/base URL
+config/app_config.local.json
+
+# Internal security review (kept out of public repo)
+docs/security_review_*.md
+
+# Logs
+*.log

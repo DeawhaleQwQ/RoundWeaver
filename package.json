@@ -1,0 +1,9 @@
+{
+  "name": "cs2plugin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}

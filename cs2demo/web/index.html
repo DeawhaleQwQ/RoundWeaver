@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CS2 Dust2 2D Replay</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Dust2 2D Demo Replay</div>
+    <label>Demo <select id="demoSelect"></select></label>
+    <button id="prepareBtn">加载解析结果</button>
+    <label>Round <select id="roundSelect"></select></label>
+    <span class="mode-badge" id="modeText">Replay</span>
+    <span id="tickText">tick -</span>
+    <span id="statusText">未加载</span>
+  </header>
+
+  <main class="layout">
+    <section class="replay-panel">
+      <div class="canvas-wrap">
+        <div id="mapStage" class="map-stage">
+          <canvas id="radarCanvas" width="1024" height="1024"></canvas>
+          <div id="mapToolbar" class="map-toolbar" aria-label="地图工具栏">
+            <button type="button" class="map-tool-button active" data-map-tool="select">选择</button>
+            <button type="button" class="map-tool-button" data-map-tool="pan">拖图</button>
+            <button type="button" class="map-tool-button sandbox-only" data-map-tool="move">移动</button>
+            <button type="button" class="map-tool-button sandbox-only" data-map-tool="arrow">箭头</button>
+            <button type="button" class="map-tool-button sandbox-only" data-map-tool="text">文字</button>
+            <button type="button" class="map-tool-button sandbox-only" data-map-tool="utility">道具</button>
+            <span class="map-toolbar-divider"></span>
+            <button type="button" id="zoomInBtn" class="map-tool-button">+</button>
+            <button type="button" id="zoomOutBtn" class="map-tool-button">-</button>
+            <button type="button" id="fitMapBtn" class="map-tool-button">Fit</button>
+            <button type="button" id="resetViewBtn" class="map-tool-button">Reset</button>
+            <div id="sandboxToolbarActions" class="map-toolbar-actions sandbox-only" hidden>
+              <span class="map-toolbar-divider"></span>
+              <button id="cancelUtilityThrowBtn" class="map-tool-button sandbox-action" type="button" disabled>取消投掷</button>
+              <button id="clearSandboxUtilitiesBtn" class="map-tool-button sandbox-action" type="button" disabled>清道具</button>
+              <button id="playSandboxBtn" class="map-tool-button sandbox-action primary" type="button" disabled>播放效果</button>
+              <button id="resetSandboxTimeBtn" class="map-tool-button sandbox-action" type="button" disabled>重置时间</button>
+            </div>
+          </div>
+          <div class="utility-menu floating-utility-menu" id="sandboxUtilityMenu" hidden>
+            <div class="utility-menu-title">选择道具</div>
+            <button data-utility="smoke">烟雾弹</button>
+            <button data-utility="flashbang">闪光弹</button>
+            <button data-utility="hegrenade">HE 手雷</button>
+            <button data-utility="molotov">燃烧弹</button>
+            <button data-utility="cancel" class="utility-cancel">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="playback-controls">
+        <div class="control-row">
+          <button id="prevRoundBtn" disabled>上一回合</button>
+          <button id="back5Btn" disabled>后退 5s</button>
+          <button id="playBtn">播放</button>
+          <button id="pauseBtn">暂停</button>
+          <button id="forward5Btn" disabled>前进 5s</button>
+          <button id="nextRoundBtn" disabled>下一回合</button>
+          <button id="sandboxBtn">进入推演模式</button>
+          <button id="resumeDemoBtn" disabled>恢复播放 demo</button>
+          <button id="resetSandboxBtn" disabled>回到暂停点</button>
+          <button id="saveSandboxBtn" disabled>保存推演方案</button>
+        </div>
+        <input id="timeline" type="range" min="0" max="0" value="0" />
+        <canvas id="markerCanvas" width="1024" height="42"></canvas>
+      </div>
+    </section>
+
+    <div id="rightResizeHandle" class="right-resize-handle" role="separator" aria-label="调整地图和右侧栏宽度" aria-orientation="vertical"></div>
+
+    <aside class="right-inspector">
+      <section class="inspector-card">
+        <h2>当前对象</h2>
+        <div id="utilityDetail" class="utility-detail">点击道具轨迹或效果圈查看详情。</div>
+      </section>
+      <section class="inspector-card sandbox-context">
+        <h2>Sandbox 上下文</h2>
+        <div class="sandbox-status" id="sandboxStatus">未进入推演模式。</div>
+        <div class="sandbox-meta">
+          <div>选中人物：<span id="sandboxSelectedPlayer">-</span></div>
+          <div>选择道具：<span id="sandboxSelectedUtility">-</span></div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <section class="bottom-dock" id="bottomDock">
+    <div id="bottomResizeHandle" class="bottom-resize-handle" role="separator" aria-label="调整地图和底部栏高度" aria-orientation="horizontal"></div>
+    <div class="tab-bar" role="tablist" aria-label="底部信息面板">
+      <button class="tab-button active" data-tab="findings" type="button">Findings</button>
+      <button class="tab-button" data-tab="utilities" type="button">Utilities</button>
+      <button class="tab-button" data-tab="players" type="button">Players</button>
+      <button class="tab-button" data-tab="sandbox-objects" type="button">Sandbox Objects</button>
+      <button class="tab-button" data-tab="settings" type="button">Settings</button>
+      <button class="tab-button" data-tab="legend" type="button">Legend</button>
+      <button id="bottomDockToggle" class="dock-toggle" type="button">收起</button>
+    </div>
+
+    <div class="tab-panel active" data-panel="findings">
+      <div id="findingsList" class="findings-list"></div>
+    </div>
+
+    <div class="tab-panel" data-panel="utilities" hidden>
+      <div id="utilitiesList" class="compact-list"></div>
+    </div>
+
+    <div class="tab-panel" data-panel="players" hidden>
+      <div id="playersList" class="compact-list"></div>
+    </div>
+
+    <div class="tab-panel" data-panel="sandbox-objects" hidden>
+      <div id="sandboxObjectsList" class="compact-list"></div>
+    </div>
+
+    <div class="tab-panel" data-panel="settings" hidden>
+      <div class="settings-grid">
+        <section>
+          <h2>显示开关</h2>
+          <div class="toggle-grid compact">
+            <label><input id="showHealthBars" type="checkbox" checked /> 血条</label>
+            <label><input id="showNames" type="checkbox" checked /> 名字</label>
+            <label><input id="showYaw" type="checkbox" checked /> 朝向</label>
+          </div>
+        </section>
+        <section>
+          <h2>道具显示</h2>
+          <div class="toggle-grid compact">
+            <label><input id="showUtilities" type="checkbox" checked /> 全部道具</label>
+            <label><input id="showUtilityTrajectories" type="checkbox" checked /> 轨迹</label>
+            <label><input id="showUtilityEffects" type="checkbox" checked /> 效果</label>
+            <label><input id="showFlashBurst" type="checkbox" checked /> 闪光爆点</label>
+            <label><input id="showBlindHalo" type="checkbox" checked /> 被闪效果</label>
+            <label><input id="showHeBlast" type="checkbox" checked /> HE 范围</label>
+            <label><input id="showHeSmoke" type="checkbox" checked /> HE 黑烟</label>
+            <label><input id="showSmokeRange" type="checkbox" checked /> 烟雾范围</label>
+            <label><input id="showSmokeTimer" type="checkbox" checked /> 烟雾剩余时间</label>
+            <label><input id="showMolotovRange" type="checkbox" checked /> 燃烧范围</label>
+            <label><input id="showSmoke" type="checkbox" checked /> Smoke</label>
+            <label><input id="showFlashbang" type="checkbox" checked /> Flash</label>
+            <label><input id="showHegrenade" type="checkbox" checked /> HE</label>
+            <label><input id="showMolotov" type="checkbox" checked /> Molotov</label>
+            <label><input id="showDecoy" type="checkbox" /> Decoy</label>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="sandbox" hidden>
+      <div class="sandbox-tab-grid">
+        <section>
+          <h2>Sandbox 工具</h2>
+          <div class="tool-row inline-tools">
+            <label><input type="radio" name="sandboxTool" value="drag" checked /> 拖 token</label>
+            <label><input type="radio" name="sandboxTool" value="arrow" /> 画箭头</label>
+            <label><input type="radio" name="sandboxTool" value="text" /> 文本</label>
+          </div>
+          <p class="hint">进入推演模式后双击人物 token，会在 token 旁边弹出道具菜单。选择道具后点击地图落点生成计划道具；拖动 token 不会弹菜单。</p>
+        </section>
+        <section>
+          <h2>推演控制</h2>
+          <p class="hint">推演播放、重置时间、取消投掷和清除沙盘道具已移到地图左上的浮动工具栏。</p>
+        </section>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="legend" hidden>
+      <ul class="legend">
+        <li><span class="dot kill"></span> 击杀/死亡</li>
+        <li><span class="dot bomb"></span> 下包/拆包/爆包</li>
+        <li><span class="dot finding"></span> Finding</li>
+        <li><span class="dot utility"></span> 道具</li>
+      </ul>
+    </div>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

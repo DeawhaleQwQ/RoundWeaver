@@ -1,0 +1,7 @@
+demoparser2
+pandas
+pyarrow
+Pillow
+PyYAML
+fastapi
+uvicorn[standard]
