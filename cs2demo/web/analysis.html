@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Demo 分析 · RoundWeaver</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/pages.css" />
+</head>
+<body class="page-body">
+  <header id="topNav" class="topnav"></header>
+
+  <main class="page-main">
+    <section class="page-section">
+      <div class="section-head">
+        <h2>Demo 分析</h2>
+        <span id="analysisStatus" class="hint"></span>
+      </div>
+      <div class="filter-row">
+        <label>Demo <select id="analysisDemoSelect"></select></label>
+        <label>阵营 <select id="analysisSide"><option value="all">全部</option><option value="T">T</option><option value="CT">CT</option></select></label>
+        <label>战队 <select id="analysisTeam"><option value="all">全部</option></select></label>
+        <button id="openReplayBtn" type="button">在回放中打开</button>
+      </div>
+    </section>
+
+    <section class="page-section">
+      <h2>玩家数据</h2>
+      <div id="playerStatsTable" class="stats-table"></div>
+    </section>
+
+    <section class="page-section">
+      <h2>复盘 Findings</h2>
+      <div class="filter-row">
+        <label><input id="ftTrade" class="ft" type="checkbox" data-ft="trade" checked /> 没补枪</label>
+        <label><input id="ftEntry" class="ft" type="checkbox" data-ft="entry" checked /> 突破</label>
+        <label><input id="ftStall" class="ft" type="checkbox" data-ft="stall" checked /> 便秘</label>
+        <label><input id="ftPost" class="ft" type="checkbox" data-ft="postplant" checked /> 包后</label>
+      </div>
+      <div id="findingsList" class="analysis-findings"></div>
+    </section>
+  </main>
+
+  <footer class="home-footer">分析页只读现有导出数据 · 不修改 demo</footer>
+
+  <script src="/static/shared.js"></script>
+  <script src="/static/analysis.js"></script>
+</body>
+</html>

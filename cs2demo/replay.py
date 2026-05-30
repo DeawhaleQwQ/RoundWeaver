@@ -54,6 +54,7 @@ TICK_COLUMNS = [
 ]
 ROOM_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 NOTEBOOK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
+TEAM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 
 
 @dataclass(frozen=True)
@@ -1037,6 +1038,132 @@ def list_notebooks(paths: ProjectPaths | None = None) -> list[dict[str, Any]]:
             }
         )
     return notebooks
+
+
+def teams_dir(paths: ProjectPaths | None = None) -> Path:
+    paths = paths or project_paths()
+    return paths.outputs_dir / "teams"
+
+
+def normalize_team_id(team_id: str) -> str:
+    value = str(team_id or "")
+    if not TEAM_ID_PATTERN.fullmatch(value):
+        raise KeyError(f"Unknown team_id: {team_id}")
+    return value
+
+
+def team_path(team_id: str, paths: ProjectPaths | None = None) -> Path:
+    paths = paths or project_paths()
+    directory = teams_dir(paths).resolve()
+    path = (directory / f"{normalize_team_id(team_id)}.json").resolve()
+    if path.parent != directory:
+        raise KeyError(f"Unknown team_id: {team_id}")
+    return path
+
+
+def generate_team_id(paths: ProjectPaths | None = None) -> str:
+    paths = paths or project_paths()
+    teams_dir(paths).mkdir(parents=True, exist_ok=True)
+    for _ in range(100):
+        tid = secrets.token_urlsafe(12)
+        if len(tid) >= 10 and TEAM_ID_PATTERN.fullmatch(tid) and not team_path(tid, paths).exists():
+            return tid
+    raise RuntimeError("Could not allocate team id")
+
+
+def _normalize_member(member: dict[str, Any]) -> dict[str, Any]:
+    member = member or {}
+    member_id = str(member.get("member_id") or "").strip() or secrets.token_urlsafe(8)
+    aliases = [str(a).strip() for a in (member.get("aliases") or []) if str(a).strip()][:20]
+    return {
+        "member_id": member_id,
+        "display_name": str(member.get("display_name") or "").strip()[:60] or "成员",
+        "steamid": (str(member.get("steamid")).strip() if member.get("steamid") else None),
+        "aliases": aliases,
+        "note": str(member.get("note") or "")[:500],
+        "profile_notebook_id": (str(member.get("profile_notebook_id")) if member.get("profile_notebook_id") else None),
+    }
+
+
+def _normalize_team_payload(payload: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    base = dict(existing or {})
+    if "name" in payload or not base.get("name"):
+        base["name"] = str(payload.get("name") or base.get("name") or "").strip()[:80] or "未命名战队"
+    if "members" in payload:
+        base["members"] = [_normalize_member(m) for m in (payload.get("members") or [])]
+    else:
+        base.setdefault("members", [])
+    return base
+
+
+def create_team(payload: dict[str, Any] | None = None, paths: ProjectPaths | None = None) -> dict[str, Any]:
+    paths = paths or project_paths()
+    now = datetime.now(timezone.utc).isoformat()
+    team = _normalize_team_payload(payload or {})
+    team.update({"schema_version": 1, "team_id": generate_team_id(paths), "created_at": now, "updated_at": now})
+    return save_team(team, paths)
+
+
+def save_team(team: dict[str, Any], paths: ProjectPaths | None = None) -> dict[str, Any]:
+    paths = paths or project_paths()
+    tid = normalize_team_id(team.get("team_id"))
+    now = datetime.now(timezone.utc).isoformat()
+    state = dict(team)
+    state["team_id"] = tid
+    state.setdefault("schema_version", 1)
+    state.setdefault("created_at", now)
+    state["updated_at"] = now
+    state["members"] = [_normalize_member(m) for m in state.get("members", [])]
+    teams_dir(paths).mkdir(parents=True, exist_ok=True)
+    write_json_atomic(team_path(tid, paths), state)
+    return state
+
+
+def load_team(team_id: str, paths: ProjectPaths | None = None) -> dict[str, Any]:
+    paths = paths or project_paths()
+    path = team_path(team_id, paths)
+    if not path.exists():
+        raise KeyError(f"Unknown team_id: {team_id}")
+    return read_json(path)
+
+
+def update_team(team_id: str, payload: dict[str, Any], paths: ProjectPaths | None = None) -> dict[str, Any]:
+    paths = paths or project_paths()
+    existing = load_team(team_id, paths)
+    merged = _normalize_team_payload(payload, existing)
+    merged["team_id"] = existing["team_id"]
+    merged["created_at"] = existing.get("created_at")
+    return save_team(merged, paths)
+
+
+def delete_team(team_id: str, paths: ProjectPaths | None = None) -> None:
+    path = team_path(team_id, paths)
+    if path.exists():
+        path.unlink()
+
+
+def list_teams(paths: ProjectPaths | None = None) -> list[dict[str, Any]]:
+    paths = paths or project_paths()
+    directory = teams_dir(paths)
+    if not directory.exists():
+        return []
+    teams = []
+    for path in sorted(directory.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            team = read_json(path)
+            tid = normalize_team_id(team.get("team_id") or path.stem)
+        except Exception:
+            continue
+        teams.append(
+            {
+                "team_id": tid,
+                "name": team.get("name") or "未命名战队",
+                "member_count": len(team.get("members") or []),
+                "created_at": team.get("created_at"),
+                "updated_at": team.get("updated_at"),
+            }
+        )
+    return teams
 
 
 def save_sandbox_state(demo_id: str, payload: dict[str, Any], paths: ProjectPaths | None = None) -> dict[str, Any]:

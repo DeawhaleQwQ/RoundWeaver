@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>战队管理 · RoundWeaver</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/pages.css" />
+</head>
+<body class="page-body">
+  <header id="topNav" class="topnav"></header>
+
+  <main class="page-main">
+    <section class="page-section">
+      <div class="section-head">
+        <h2>战队</h2>
+        <button id="newTeamBtn" class="primary-button" type="button">新建战队</button>
+      </div>
+      <div id="teamList" class="team-list"></div>
+    </section>
+
+    <section class="page-section" id="teamEditor" hidden>
+      <div class="section-head">
+        <h2 id="teamEditorTitle">编辑战队</h2>
+        <span id="teamEditorStatus" class="hint"></span>
+      </div>
+      <label class="field-row">战队名称
+        <input id="teamNameInput" type="text" maxlength="80" placeholder="例如：午夜五排" />
+      </label>
+
+      <h3 class="sub-head">成员</h3>
+      <div id="memberRows" class="member-rows"></div>
+      <button id="addMemberBtn" type="button">+ 添加成员</button>
+
+      <div class="editor-actions">
+        <button id="saveTeamBtn" class="primary-button" type="button">保存战队</button>
+        <button id="deleteTeamBtn" type="button">删除战队</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="home-footer">战队/成员数据保存在本地 outputs/teams/*.json</footer>
+
+  <script src="/static/shared.js"></script>
+  <script src="/static/teams.js"></script>
+</body>
+</html>

@@ -24,17 +24,22 @@ import uvicorn
 from cs2demo.replay import (
     create_notebook,
     create_room_state,
+    create_team,
     delete_notebook,
     delete_room_state,
+    delete_team,
     ensure_replay_cache,
     latest_sandbox_state,
     list_demos,
     list_notebooks,
     list_room_states,
+    list_teams,
     load_notebook,
     load_room_state,
+    load_team,
     normalize_room_code,
     normalize_notebook_id,
+    normalize_team_id,
     room_is_expired,
     parse_iso_datetime,
     purge_expired_rooms,
@@ -45,6 +50,7 @@ from cs2demo.replay import (
     save_room_state,
     save_sandbox_state,
     update_notebook,
+    update_team,
 )
 from cs2demo.tunnel import TunnelManager
 
@@ -633,6 +639,22 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
     def replay_page() -> FileResponse:
         return FileResponse(paths.web_dir / "index.html")
 
+    @app.get("/analysis")
+    def analysis_page() -> FileResponse:
+        return FileResponse(paths.web_dir / "analysis.html")
+
+    @app.get("/teams")
+    def teams_page() -> FileResponse:
+        return FileResponse(paths.web_dir / "teams.html")
+
+    @app.get("/teams/{team_id}")
+    def team_page(team_id: str) -> FileResponse:
+        try:
+            normalize_team_id(team_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(paths.web_dir / "teams.html")
+
     @app.get("/r/{room_code}")
     def room_entry(room_code: str) -> FileResponse:
         try:
@@ -738,6 +760,38 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         delete_notebook(notebook_id, paths)
+        return {"ok": True, "deleted": True}
+
+    @app.get("/api/teams")
+    def api_teams() -> dict[str, Any]:
+        return {"teams": list_teams(paths)}
+
+    @app.post("/api/teams")
+    def api_create_team(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        team = create_team(payload or {}, paths)
+        return {"ok": True, "created": True, "team": team}
+
+    @app.get("/api/teams/{team_id}")
+    def api_get_team(team_id: str) -> dict[str, Any]:
+        try:
+            return {"team": load_team(team_id, paths)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.put("/api/teams/{team_id}")
+    def api_update_team(team_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            return {"ok": True, "team": update_team(team_id, payload, paths)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.delete("/api/teams/{team_id}")
+    def api_delete_team(team_id: str) -> dict[str, Any]:
+        try:
+            normalize_team_id(team_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        delete_team(team_id, paths)
         return {"ok": True, "deleted": True}
 
     @app.get("/api/rooms")
