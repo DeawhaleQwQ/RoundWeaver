@@ -73,6 +73,16 @@ member's **profile notebook**. A general **notebook library** (create / save /
 recall, stored as local JSON) is available in the replay bottom dock; member
 profile notebooks share that same store.
 
+![Homepage](assets/screenshots/homepage.png)
+
+The Demo Analysis page — player stats + findings, filterable by team member:
+
+![Demo analysis page](assets/screenshots/analysis.png)
+
+Teams page with a member's profile notebook:
+
+![Teams and member profile](assets/screenshots/teams_profile.png)
+
 ### 2. Quickstart
 
 #### 2.1 Install dependencies
@@ -191,6 +201,16 @@ conda run -n cs2demo python -m cs2demo.cli export-replay samples/demos/<your_dem
 可按某战队成员（按 SteamID 或昵称/别名匹配）筛选结果。战队页可创建战队、设置成员，
 并进入每个成员的**画像笔记本**。回放页底部还有通用**笔记本库**（随时新建/保存/调用，
 本地 JSON 存储）；成员画像笔记本与其共用同一存储。
+
+![首页](assets/screenshots/homepage.png)
+
+Demo 分析页 —— 玩家数据 + findings，可按战队成员筛选：
+
+![Demo 分析页](assets/screenshots/analysis.png)
+
+战队页与成员画像笔记本：
+
+![战队与成员画像](assets/screenshots/teams_profile.png)
 
 ### 2. Quickstart
 
