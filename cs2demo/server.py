@@ -22,14 +22,19 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from cs2demo.replay import (
+    create_notebook,
     create_room_state,
+    delete_notebook,
     delete_room_state,
     ensure_replay_cache,
     latest_sandbox_state,
     list_demos,
+    list_notebooks,
     list_room_states,
+    load_notebook,
     load_room_state,
     normalize_room_code,
+    normalize_notebook_id,
     room_is_expired,
     parse_iso_datetime,
     purge_expired_rooms,
@@ -39,6 +44,7 @@ from cs2demo.replay import (
     resolve_demo_path,
     save_room_state,
     save_sandbox_state,
+    update_notebook,
 )
 from cs2demo.tunnel import TunnelManager
 
@@ -353,6 +359,19 @@ def save_room_debounced(room_code: str, paths: Any, delay: float = 0.75) -> None
     ROOM_SAVE_TASKS[room_code] = asyncio.create_task(delayed_save())
 
 
+def flush_room_save(room_code: str, paths: Any) -> None:
+    """Cancel any pending debounced save and persist the room synchronously.
+
+    Prevents losing the last debounced mutation (e.g. a move_token) when a
+    socket dies before the 0.75s debounce fires."""
+    existing = ROOM_SAVE_TASKS.pop(room_code, None)
+    if existing and not existing.done():
+        existing.cancel()
+    room = ROOMS.get(room_code)
+    if room:
+        save_room_state(room, paths)
+
+
 def default_playback_for_demo(demo_id: str, payload: dict[str, Any], paths: Any) -> dict[str, Any]:
     manifest_path = ensure_replay_cache(demo_id, paths=paths)
     manifest = read_json(manifest_path)
@@ -381,7 +400,7 @@ def default_playback_for_demo(demo_id: str, payload: dict[str, Any], paths: Any)
     if last_tick is not None:
         selected_tick = min(int(last_tick), selected_tick)
     now = utc_now_iso()
-    return {"round_number": selected_round, "tick": selected_tick, "is_playing": False, "updated_at": now, "server_time_ms": server_time_ms()}
+    return {"round_number": selected_round, "tick": selected_tick, "is_playing": False, "speed": 1, "updated_at": now, "server_time_ms": server_time_ms()}
 
 
 def compact_playback_payload(room: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -392,6 +411,12 @@ def compact_playback_payload(room: dict[str, Any], payload: dict[str, Any]) -> d
         playback["tick"] = payload.get("tick")
     if "is_playing" in payload:
         playback["is_playing"] = bool(payload.get("is_playing"))
+    if "speed" in payload:
+        try:
+            playback["speed"] = float(payload.get("speed"))
+        except (TypeError, ValueError):
+            playback["speed"] = 1
+    playback.setdefault("speed", 1)
     playback["updated_at"] = utc_now_iso()
     playback["server_time_ms"] = server_time_ms()
     return playback
@@ -679,6 +704,38 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/api/notebooks")
+    def api_notebooks() -> dict[str, Any]:
+        return {"notebooks": list_notebooks(paths)}
+
+    @app.post("/api/notebooks")
+    def api_create_notebook(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        notebook = create_notebook(payload or {}, paths)
+        return {"ok": True, "created": True, "notebook": notebook}
+
+    @app.get("/api/notebooks/{notebook_id}")
+    def api_get_notebook(notebook_id: str) -> dict[str, Any]:
+        try:
+            return {"notebook": load_notebook(notebook_id, paths)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.put("/api/notebooks/{notebook_id}")
+    def api_update_notebook(notebook_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            return {"ok": True, "notebook": update_notebook(notebook_id, payload, paths)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.delete("/api/notebooks/{notebook_id}")
+    def api_delete_notebook(notebook_id: str) -> dict[str, Any]:
+        try:
+            normalize_notebook_id(notebook_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        delete_notebook(notebook_id, paths)
+        return {"ok": True, "deleted": True}
+
     @app.get("/api/rooms")
     def api_rooms() -> dict[str, Any]:
         purge_expired_rooms(paths, ROOM_IDLE_TTL_SEC)
@@ -794,6 +851,10 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
             increment_room_version(room)
             save_room_state(room, paths)
             participants = room_participants(room)
+            # Refresh playback timing on the snapshot so a late joiner can align
+            # to the room's current tick from elapsed wall-clock (drift correction).
+            if isinstance(room.get("playback"), dict):
+                room["playback"]["server_time_ms"] = server_time_ms()
             await websocket.send_json({"type": "room_snapshot", "client_id": client_id, "room": room_public_state(room), "server_time_ms": server_time_ms()})
             await broadcast_room(code, {"type": "participant_update", "version": room["version"], "participants": participants}, exclude_client_id=client_id)
 
@@ -817,6 +878,7 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
             pass
         finally:
             if client_id:
+                flush_room_save(code, paths)
                 if ROOM_CONNECTION_IDS.get(code, {}).get(client_id) == connection_id:
                     ROOM_CONNECTIONS.get(code, {}).pop(client_id, None)
                     ROOM_CONNECTION_IDS.get(code, {}).pop(client_id, None)

@@ -49,6 +49,7 @@ TICK_COLUMNS = [
     "has_bomb",
 ]
 ROOM_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
+NOTEBOOK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 
 
 @dataclass(frozen=True)
@@ -755,6 +756,7 @@ def create_room_state(
             "round_number": selected_round,
             "tick": selected_tick,
             "is_playing": False,
+            "speed": 1,
             "updated_at": now,
             "server_time_ms": None,
         },
@@ -773,6 +775,131 @@ def create_room_state(
         "settings": {"max_participants": 5},
     }
     return save_room_state(room, paths)
+
+
+def notebooks_dir(paths: ProjectPaths | None = None) -> Path:
+    paths = paths or project_paths()
+    return paths.outputs_dir / "notebooks"
+
+
+def normalize_notebook_id(notebook_id: str) -> str:
+    value = str(notebook_id or "")
+    if not NOTEBOOK_ID_PATTERN.fullmatch(value):
+        raise KeyError(f"Unknown notebook_id: {notebook_id}")
+    return value
+
+
+def notebook_path(notebook_id: str, paths: ProjectPaths | None = None) -> Path:
+    paths = paths or project_paths()
+    directory = notebooks_dir(paths).resolve()
+    path = (directory / f"{normalize_notebook_id(notebook_id)}.json").resolve()
+    if path.parent != directory:
+        raise KeyError(f"Unknown notebook_id: {notebook_id}")
+    return path
+
+
+def generate_notebook_id(paths: ProjectPaths | None = None) -> str:
+    paths = paths or project_paths()
+    notebooks_dir(paths).mkdir(parents=True, exist_ok=True)
+    for _ in range(100):
+        nid = secrets.token_urlsafe(12)
+        if len(nid) >= 10 and NOTEBOOK_ID_PATTERN.fullmatch(nid) and not notebook_path(nid, paths).exists():
+            return nid
+    raise RuntimeError("Could not allocate notebook id")
+
+
+def _notebook_preview(body: str, limit: int = 120) -> str:
+    text = " ".join(str(body or "").split())
+    return text[:limit]
+
+
+def create_notebook(payload: dict[str, Any] | None = None, paths: ProjectPaths | None = None) -> dict[str, Any]:
+    paths = paths or project_paths()
+    payload = payload or {}
+    now = datetime.now(timezone.utc).isoformat()
+    notebook = {
+        "schema_version": 1,
+        "notebook_id": generate_notebook_id(paths),
+        "title": str(payload.get("title") or "未命名笔记本").strip()[:120] or "未命名笔记本",
+        "body": str(payload.get("body") or ""),
+        "tags": [str(tag)[:40] for tag in (payload.get("tags") or []) if str(tag).strip()][:20],
+        "demo_id": (str(payload.get("demo_id")) if payload.get("demo_id") else None),
+        "owner_member_id": (str(payload.get("owner_member_id")) if payload.get("owner_member_id") else None),
+        "created_at": now,
+        "updated_at": now,
+    }
+    return save_notebook(notebook, paths)
+
+
+def save_notebook(notebook: dict[str, Any], paths: ProjectPaths | None = None) -> dict[str, Any]:
+    paths = paths or project_paths()
+    nid = normalize_notebook_id(notebook.get("notebook_id"))
+    now = datetime.now(timezone.utc).isoformat()
+    state = dict(notebook)
+    state["notebook_id"] = nid
+    state.setdefault("schema_version", 1)
+    state.setdefault("created_at", now)
+    state["updated_at"] = now
+    notebooks_dir(paths).mkdir(parents=True, exist_ok=True)
+    write_json_atomic(notebook_path(nid, paths), state)
+    return state
+
+
+def load_notebook(notebook_id: str, paths: ProjectPaths | None = None) -> dict[str, Any]:
+    paths = paths or project_paths()
+    path = notebook_path(notebook_id, paths)
+    if not path.exists():
+        raise KeyError(f"Unknown notebook_id: {notebook_id}")
+    return read_json(path)
+
+
+def update_notebook(notebook_id: str, payload: dict[str, Any], paths: ProjectPaths | None = None) -> dict[str, Any]:
+    paths = paths or project_paths()
+    existing = load_notebook(notebook_id, paths)
+    if "title" in payload:
+        existing["title"] = str(payload.get("title") or "未命名笔记本").strip()[:120] or "未命名笔记本"
+    if "body" in payload:
+        existing["body"] = str(payload.get("body") or "")
+    if "tags" in payload:
+        existing["tags"] = [str(tag)[:40] for tag in (payload.get("tags") or []) if str(tag).strip()][:20]
+    if "demo_id" in payload:
+        existing["demo_id"] = (str(payload.get("demo_id")) if payload.get("demo_id") else None)
+    if "owner_member_id" in payload:
+        existing["owner_member_id"] = (str(payload.get("owner_member_id")) if payload.get("owner_member_id") else None)
+    return save_notebook(existing, paths)
+
+
+def delete_notebook(notebook_id: str, paths: ProjectPaths | None = None) -> None:
+    path = notebook_path(notebook_id, paths)
+    if path.exists():
+        path.unlink()
+
+
+def list_notebooks(paths: ProjectPaths | None = None) -> list[dict[str, Any]]:
+    paths = paths or project_paths()
+    directory = notebooks_dir(paths)
+    if not directory.exists():
+        return []
+    notebooks = []
+    for path in sorted(directory.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            notebook = read_json(path)
+            nid = normalize_notebook_id(notebook.get("notebook_id") or path.stem)
+        except Exception:
+            continue
+        notebooks.append(
+            {
+                "notebook_id": nid,
+                "title": notebook.get("title") or "未命名笔记本",
+                "tags": notebook.get("tags") or [],
+                "demo_id": notebook.get("demo_id"),
+                "owner_member_id": notebook.get("owner_member_id"),
+                "preview": _notebook_preview(notebook.get("body")),
+                "created_at": notebook.get("created_at"),
+                "updated_at": notebook.get("updated_at"),
+            }
+        )
+    return notebooks
 
 
 def save_sandbox_state(demo_id: str, payload: dict[str, Any], paths: ProjectPaths | None = None) -> dict[str, Any]:

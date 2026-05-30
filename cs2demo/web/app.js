@@ -15,6 +15,7 @@ const state = {
   rafId: null,
   playStartTime: 0,
   playStartTick: null,
+  playbackSpeed: 1,
   roundLoadSeq: 0,
   yawCacheBySteamid: new Map(),
   yawUnit: 'degree',
@@ -69,6 +70,13 @@ const state = {
     reconnecting: false,
     lastHeartbeatAckAt: 0,
     lastCursorSentAt: 0,
+    lastAppliedVersion: 0,
+    serverTimeOffsetMs: 0,
+  },
+  notebooks: {
+    list: [],
+    activeId: null,
+    dirty: false,
   },
   shareStatus: {
     publicReady: false,
@@ -149,6 +157,7 @@ const els = {
   back5Btn: document.getElementById('back5Btn'),
   playBtn: document.getElementById('playBtn'),
   pauseBtn: document.getElementById('pauseBtn'),
+  speedSelect: document.getElementById('speedSelect'),
   forward5Btn: document.getElementById('forward5Btn'),
   nextRoundBtn: document.getElementById('nextRoundBtn'),
   sandboxBtn: document.getElementById('sandboxBtn'),
@@ -212,6 +221,13 @@ const els = {
   resetSandboxTimeBtn: document.getElementById('resetSandboxTimeBtn'),
   bottomDock: document.getElementById('bottomDock'),
   bottomDockToggle: document.getElementById('bottomDockToggle'),
+  notebookList: document.getElementById('notebookList'),
+  notebookTitleInput: document.getElementById('notebookTitleInput'),
+  notebookBodyInput: document.getElementById('notebookBodyInput'),
+  notebookNewBtn: document.getElementById('notebookNewBtn'),
+  notebookSaveBtn: document.getElementById('notebookSaveBtn'),
+  notebookDeleteBtn: document.getElementById('notebookDeleteBtn'),
+  notebookStatus: document.getElementById('notebookStatus'),
   tabButtons: Array.from(document.querySelectorAll('.tab-button')),
   tabPanels: Array.from(document.querySelectorAll('.tab-panel')),
 };
@@ -345,6 +361,7 @@ async function init() {
   updateMapToolbar();
   renderRoomPanel();
   drawEmpty();
+  loadNotebooks().catch(err => console.error(err));
   const roomCode = roomCodeFromUrl();
   if (roomCode) await loadRoomFromUrl(roomCode);
 }
@@ -365,6 +382,7 @@ function bindEvents() {
   els.back5Btn.addEventListener('click', () => seekBySeconds(-5));
   els.playBtn.addEventListener('click', play);
   els.pauseBtn.addEventListener('click', pause);
+  els.speedSelect?.addEventListener('change', () => setPlaybackSpeed(Number(els.speedSelect.value)));
   els.forward5Btn.addEventListener('click', () => seekBySeconds(5));
   els.nextRoundBtn.addEventListener('click', nextRound);
   els.timeline.addEventListener('input', () => {
@@ -381,6 +399,11 @@ function bindEvents() {
   els.playSandboxBtn.addEventListener('click', toggleSandboxPlayback);
   els.resetSandboxTimeBtn.addEventListener('click', resetSandboxTime);
   els.sandboxUtilityMenu.addEventListener('click', onSandboxUtilityMenuClick);
+  els.notebookNewBtn?.addEventListener('click', createNotebookDraft);
+  els.notebookSaveBtn?.addEventListener('click', saveCurrentNotebook);
+  els.notebookDeleteBtn?.addEventListener('click', deleteCurrentNotebook);
+  els.notebookTitleInput?.addEventListener('input', () => { state.notebooks.dirty = true; });
+  els.notebookBodyInput?.addEventListener('input', () => { state.notebooks.dirty = true; });
   document.addEventListener('keydown', handleGlobalKeydown);
   window.addEventListener('resize', () => resizeCanvasToStage());
   bindBottomTabs();
@@ -767,15 +790,27 @@ async function applyRoomSnapshot(room, clientId) {
   if (clientId) state.room.clientId = clientId;
   state.room.participants = room.participants || {};
   state.room.pendingSnapshot = room;
+  const playback = room.playback || {};
+  // Apply speed before computing the drift tick so a late joiner aligns correctly.
+  if (playback.speed !== undefined) setPlaybackSpeed(Number(playback.speed), { suppressBroadcast: true });
+  // Drift correction: if the room is playing, advance the joiner's tick by the
+  // wall-clock elapsed since the snapshot's server_time_ms.
+  let joinTick = playback.tick;
+  if (playback.is_playing && Number.isFinite(Number(playback.tick)) && Number.isFinite(Number(playback.server_time_ms))) {
+    const elapsedMs = Math.max(0, (Date.now() + state.room.serverTimeOffsetMs) - Number(playback.server_time_ms));
+    joinTick = Number(playback.tick) + Math.floor((elapsedMs / 1000) * getTickRate() * state.playbackSpeed);
+  }
   if (room.demo_id && (room.demo_id !== state.demoId || !state.manifest)) {
-    await loadDemoReplay(room.demo_id, { roundNumber: room.playback?.round_number, tick: room.playback?.tick });
-  } else if (room.playback?.round_number !== undefined) {
-    await withSuppressedRoomBroadcastAsync(() => switchToRound(room.playback.round_number, { tick: room.playback.tick, suppressBroadcast: true }));
+    await loadDemoReplay(room.demo_id, { roundNumber: playback.round_number, tick: joinTick });
+  } else if (playback.round_number !== undefined) {
+    await withSuppressedRoomBroadcastAsync(() => switchToRound(playback.round_number, { tick: joinTick, suppressBroadcast: true }));
   }
   if (room.mode === 'sandbox' && room.sandbox?.active !== false) {
     applyRoomSandbox(room.sandbox);
   } else if (state.sandbox && room.mode === 'replay') {
     exitSandboxLocal();
+  } else if (playback.is_playing && !state.sandbox) {
+    await withSuppressedRoomBroadcastAsync(async () => { if (joinTick !== undefined) seekToTick(Number(joinTick), { suppressBroadcast: true }); play({ suppressBroadcast: true }); });
   }
   renderRoomPanel();
 }
@@ -877,12 +912,17 @@ async function handleRoomSocketMessage(event) {
     state.room.reconnecting = false;
     state.room.reconnectAttempts = 0;
     state.room.clientId = message.client_id;
+    state.room.lastAppliedVersion = Number(message.room?.version) || 0;
+    if (Number.isFinite(Number(message.server_time_ms))) {
+      state.room.serverTimeOffsetMs = Number(message.server_time_ms) - Date.now();
+    }
     startRoomHeartbeat();
     await applyRoomSnapshot(message.room, message.client_id);
     setStatus(`房间 ${state.room.code} 已连接`);
     return;
   }
   if (message.type === 'participant_update') {
+    if (Number.isFinite(Number(message.version))) state.room.lastAppliedVersion = Math.max(state.room.lastAppliedVersion, Number(message.version));
     state.room.participants = message.participants || {};
     renderRoomPanel();
     return;
@@ -892,6 +932,13 @@ async function handleRoomSocketMessage(event) {
     return;
   }
   if (message.type === 'state_update') {
+    const incomingVersion = Number(message.version);
+    // Screen-consistency guard: drop stale/out-of-order patches that can arrive
+    // after a newer one during reconnect or replay.
+    if (Number.isFinite(incomingVersion) && incomingVersion <= state.room.lastAppliedVersion) {
+      return;
+    }
+    if (Number.isFinite(incomingVersion)) state.room.lastAppliedVersion = incomingVersion;
     await applyRoomStateUpdate(message);
   }
 }
@@ -918,6 +965,7 @@ async function applyRoomStateUpdate(message) {
     if (payload.playback) {
       const playback = payload.playback;
       await withSuppressedRoomBroadcastAsync(async () => {
+        if (playback.speed !== undefined) setPlaybackSpeed(Number(playback.speed), { suppressBroadcast: true });
         if (Number(playback.round_number) !== Number(state.currentRound)) await switchToRound(Number(playback.round_number), { tick: playback.tick, suppressBroadcast: true });
         else if (playback.tick !== undefined) seekToTick(Number(playback.tick), { suppressBroadcast: true });
         if (playback.is_playing) play({ suppressBroadcast: true });
@@ -1144,12 +1192,126 @@ function renderRoomPanel() {
   }
 }
 
+async function loadNotebooks() {
+  try {
+    const payload = await api('/api/notebooks');
+    state.notebooks.list = payload.notebooks || [];
+  } catch (err) {
+    state.notebooks.list = [];
+    throw err;
+  }
+  renderNotebookList();
+}
+
+function setNotebookStatus(text) {
+  if (els.notebookStatus) els.notebookStatus.textContent = text || '';
+}
+
+function renderNotebookList() {
+  if (!els.notebookList) return;
+  els.notebookList.innerHTML = '';
+  if (!state.notebooks.list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'hint';
+    empty.textContent = '还没有笔记本，点“新建”创建一个。';
+    els.notebookList.appendChild(empty);
+    return;
+  }
+  for (const notebook of state.notebooks.list) {
+    const item = document.createElement('div');
+    item.className = `compact-list-item notebook-item ${notebook.notebook_id === state.notebooks.activeId ? 'active' : ''}`;
+    item.innerHTML = `
+      <div class="notebook-item-title">${escapeHtml(notebook.title || '未命名笔记本')}</div>
+      <div class="notebook-item-meta">${escapeHtml(notebook.preview || '')}</div>
+    `;
+    item.addEventListener('click', () => openNotebook(notebook.notebook_id));
+    els.notebookList.appendChild(item);
+  }
+}
+
+async function openNotebook(notebookId) {
+  if (state.notebooks.dirty && !confirm('当前笔记本有未保存改动，切换会丢失。继续吗？')) return;
+  try {
+    const payload = await api(`/api/notebooks/${encodeURIComponent(notebookId)}`);
+    const notebook = payload.notebook;
+    state.notebooks.activeId = notebook.notebook_id;
+    state.notebooks.dirty = false;
+    if (els.notebookTitleInput) els.notebookTitleInput.value = notebook.title || '';
+    if (els.notebookBodyInput) els.notebookBodyInput.value = notebook.body || '';
+    setNotebookStatus(`已打开：${notebook.title || '未命名笔记本'}`);
+    renderNotebookList();
+  } catch (err) {
+    console.error(err);
+    setNotebookStatus('打开笔记本失败');
+  }
+}
+
+function createNotebookDraft() {
+  if (state.notebooks.dirty && !confirm('当前笔记本有未保存改动，新建会丢失。继续吗？')) return;
+  state.notebooks.activeId = null;
+  state.notebooks.dirty = false;
+  if (els.notebookTitleInput) els.notebookTitleInput.value = '';
+  if (els.notebookBodyInput) els.notebookBodyInput.value = '';
+  setNotebookStatus('新建笔记本（未保存）');
+  renderNotebookList();
+  els.notebookTitleInput?.focus();
+}
+
+async function saveCurrentNotebook() {
+  const title = els.notebookTitleInput?.value?.trim() || '未命名笔记本';
+  const body = els.notebookBodyInput?.value || '';
+  try {
+    if (state.notebooks.activeId) {
+      const payload = await api(`/api/notebooks/${encodeURIComponent(state.notebooks.activeId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body }),
+      });
+      state.notebooks.activeId = payload.notebook.notebook_id;
+    } else {
+      const payload = await api('/api/notebooks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body }),
+      });
+      state.notebooks.activeId = payload.notebook.notebook_id;
+    }
+    state.notebooks.dirty = false;
+    setNotebookStatus('已保存');
+    await loadNotebooks();
+  } catch (err) {
+    console.error(err);
+    setNotebookStatus('保存失败');
+  }
+}
+
+async function deleteCurrentNotebook() {
+  if (!state.notebooks.activeId) {
+    createNotebookDraft();
+    return;
+  }
+  if (!confirm('删除这个笔记本？此操作不可撤销。')) return;
+  try {
+    await api(`/api/notebooks/${encodeURIComponent(state.notebooks.activeId)}`, { method: 'DELETE' });
+    state.notebooks.activeId = null;
+    state.notebooks.dirty = false;
+    if (els.notebookTitleInput) els.notebookTitleInput.value = '';
+    if (els.notebookBodyInput) els.notebookBodyInput.value = '';
+    setNotebookStatus('已删除');
+    await loadNotebooks();
+  } catch (err) {
+    console.error(err);
+    setNotebookStatus('删除失败');
+  }
+}
+
 function broadcastPlaybackState(overrides = {}) {
   if (!state.currentRound || state.currentTick === null || state.sandbox) return;
   sendRoomMessage('playback_control', {
     round_number: state.currentRound,
     tick: state.currentTick,
     is_playing: state.playing,
+    speed: state.playbackSpeed,
     ...overrides,
   });
 }
@@ -1602,11 +1764,33 @@ function pause(options = {}) {
   if (wasPlaying && !options.suppressBroadcast) broadcastPlaybackState({ is_playing: false });
 }
 
+const PLAYBACK_SPEEDS = [0.25, 0.5, 1, 2, 4];
+
+function setPlaybackSpeed(multiplier, options = {}) {
+  let value = Number(multiplier);
+  if (!Number.isFinite(value) || value <= 0) value = 1;
+  state.playbackSpeed = value;
+  // Reseat the playback clock so the new rate applies from the current tick
+  // (both replay and sandbox loops), avoiding a tick jump.
+  if (state.playing && state.currentTick !== null) {
+    state.playStartTime = performance.now();
+    state.playStartTick = state.currentTick;
+  }
+  if (state.sandbox?.playing) {
+    state.sandbox.playStartTime = performance.now();
+    state.sandbox.playStartTick = state.sandbox.currentTick;
+  }
+  if (els.speedSelect && Number(els.speedSelect.value) !== value) {
+    els.speedSelect.value = String(value);
+  }
+  if (!options.suppressBroadcast) broadcastPlaybackState({ speed: value });
+}
+
 function loop(now) {
   if (!state.playing || !state.roundData || state.currentRound === null) return;
   const range = getRoundRange(state.currentRound);
   const elapsedSeconds = (now - state.playStartTime) / 1000;
-  let targetTick = state.playStartTick + Math.floor(elapsedSeconds * getTickRate());
+  let targetTick = state.playStartTick + Math.floor(elapsedSeconds * getTickRate() * state.playbackSpeed);
   if (Number.isFinite(range.endTick) && targetTick >= range.endTick) {
     targetTick = range.endTick;
     seekToTick(targetTick, { keepPlaying: true });
@@ -3219,7 +3403,7 @@ function stopSandboxPlayback(options = {}) {
 function sandboxLoop(now) {
   if (!state.sandbox?.playing) return;
   const elapsedSeconds = (now - state.sandbox.playStartTime) / 1000;
-  state.sandbox.currentTick = state.sandbox.playStartTick + Math.floor(elapsedSeconds * getTickRate());
+  state.sandbox.currentTick = state.sandbox.playStartTick + Math.floor(elapsedSeconds * getTickRate() * state.playbackSpeed);
   const endTick = sandboxEndTick();
   if (Number.isFinite(endTick) && state.sandbox.currentTick >= endTick) {
     state.sandbox.currentTick = endTick;
