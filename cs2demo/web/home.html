@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RoundWeaver · CS2 Dust2 复盘工具</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/pages.css" />
+</head>
+<body class="page-body">
+  <header id="topNav" class="topnav"></header>
+
+  <main class="home-main">
+    <section class="home-hero">
+      <h1 class="home-title">RoundWeaver</h1>
+      <p class="home-subtitle">本地 CS2 Dust2 demo 回放、规则复盘、沙盘推演与多人战术规划。不调用 LLM，数据全在本机。</p>
+      <div class="home-cta">
+        <a class="home-cta-button primary" href="/replay">打开回放</a>
+        <a class="home-cta-button" href="/analysis">Demo 分析</a>
+        <a class="home-cta-button" href="/teams">战队管理</a>
+      </div>
+    </section>
+
+    <section class="home-cards">
+      <a class="home-card" href="/replay">
+        <div class="home-card-title">2D 回放</div>
+        <p class="home-card-text">Dust2 俯视回放：回合切换、倍速、道具轨迹与效果、人物血条/朝向、时间轴与事件 marker。</p>
+      </a>
+      <a class="home-card" href="/replay">
+        <div class="home-card-title">沙盘推演</div>
+        <p class="home-card-text">暂停后挪动 token、画箭头/文字/画笔、模拟道具投掷与落点，保存推演方案。</p>
+      </a>
+      <a class="home-card" href="/analysis">
+        <div class="home-card-title">Demo 分析</div>
+        <p class="home-card-text">确定性规则复盘：没补枪、突破成败、便秘回合、包后失败，可按战队成员筛选。</p>
+      </a>
+      <a class="home-card" href="/teams">
+        <div class="home-card-title">战队与成员画像</div>
+        <p class="home-card-text">创建战队、设置成员，进入成员画像编辑每个人的画像笔记本。</p>
+      </a>
+      <a class="home-card" href="/replay">
+        <div class="home-card-title">多人房间</div>
+        <p class="home-card-text">创建房间邀请最多 5 人，同步回放与沙盘操作；可选公网 HTTPS 链接分享。</p>
+      </a>
+      <a class="home-card" href="/replay">
+        <div class="home-card-title">笔记本库</div>
+        <p class="home-card-text">随时记录战术与复盘要点，保存到本地笔记本库并随时调用。</p>
+      </a>
+    </section>
+  </main>
+
+  <footer class="home-footer">仅支持 de_dust2 · FastAPI + 原生前端 · 本地优先</footer>
+
+  <script src="/static/shared.js"></script>
+  <script>renderTopNav('home');</script>
+</body>
+</html>

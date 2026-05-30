@@ -1024,7 +1024,7 @@ function disconnectRoom(options = {}) {
   state.room.participants = {};
   state.room.joinProfile = null;
   state.room.intentionalClose = false;
-  if (!options.keepUrl && state.room.code) history.replaceState(null, '', '/');
+  if (!options.keepUrl && state.room.code) history.replaceState(null, '', '/replay');
   const currentCode = state.room.code;
   if (!options.keepMetadata) {
     state.room.shareUrl = null;

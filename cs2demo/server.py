@@ -627,6 +627,10 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
 
     @app.get("/")
     def index() -> FileResponse:
+        return FileResponse(paths.web_dir / "home.html")
+
+    @app.get("/replay")
+    def replay_page() -> FileResponse:
         return FileResponse(paths.web_dir / "index.html")
 
     @app.get("/r/{room_code}")

@@ -101,7 +101,9 @@ input[type="range"] { accent-color: var(--accent); }
   letter-spacing: 0.2px;
   white-space: nowrap;
   text-shadow: 0 0 18px rgba(110,168,254,0.35);
+  text-decoration: none;
 }
+.brand:hover { color: var(--accent-strong); }
 .room-bar {
   display: flex;
   align-items: center;
