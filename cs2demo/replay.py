@@ -18,7 +18,7 @@ from cs2demo.map_config import DEFAULT_OVERVIEW_PATH, DEFAULT_RADAR_PATH, load_d
 from cs2demo.parser import to_float, to_int, write_json
 from cs2demo.pipeline import ensure_analysis_outputs
 
-REPLAY_VERSION = "0.6.0"
+REPLAY_VERSION = "0.7.0"
 UTILITY_EVENT_NAMES = {
     "smokegrenade_detonate",
     "flashbang_detonate",
@@ -47,6 +47,10 @@ TICK_COLUMNS = [
     "is_alive",
     "active_weapon_name",
     "has_bomb",
+    "balance",
+    "equip_value",
+    "weapons",
+    "cash_spent",
 ]
 ROOM_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 NOTEBOOK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
@@ -204,6 +208,7 @@ def build_replay_cache(
     utilities_by_round = group_rows_by_round(utility_events, "round_number")
     base_markers = group_markers_by_round(build_markers(summary, findings, []))
     frame_counts: dict[int, int] = {}
+    score_table = round_score_table(rounds)
 
     for round_info in rounds:
         round_number = to_int(round_info.get("round"))
@@ -227,6 +232,8 @@ def build_replay_cache(
                 "utility_events": round_utilities,
                 "markers": markers,
                 "frames": frames,
+                "economy": build_round_economy(round_info, frames),
+                "score": score_table.get(round_number),
             },
         )
 
@@ -266,31 +273,64 @@ def build_replay_cache(
     return manifest
 
 
+ECONOMY_TICK_COLUMNS = ["balance", "equip_value", "weapons", "cash_spent"]
+
+
+def _available_tick_columns(path: Path) -> list[str]:
+    """Return the subset of TICK_COLUMNS actually present in the file.
+
+    Older ticks.parquet/csv (pre-economy) lack balance/equip_value/weapons/
+    cash_spent; requesting them would raise. We read only what exists and fill
+    the rest with None downstream so callers see a uniform schema."""
+    try:
+        if path.suffix == ".parquet":
+            import pyarrow.parquet as pq
+
+            # Use read_schema (top-level field names) — ParquetFile.schema.names
+            # flattens list columns to their inner field (e.g. "weapons" -> "element").
+            schema_names = set(pq.read_schema(path).names)
+        else:
+            header = pd.read_csv(path, nrows=0)
+            schema_names = set(header.columns)
+    except Exception:
+        return [col for col in TICK_COLUMNS if col not in ECONOMY_TICK_COLUMNS]
+    return [col for col in TICK_COLUMNS if col in schema_names]
+
+
+def _ensure_tick_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    for col in TICK_COLUMNS:
+        if col not in frame.columns:
+            frame[col] = None
+    return frame
+
+
 def read_ticks(path: Path) -> pd.DataFrame:
+    columns = _available_tick_columns(path)
     if path.suffix == ".parquet":
-        frame = pd.read_parquet(path, columns=TICK_COLUMNS)
+        frame = pd.read_parquet(path, columns=columns)
     else:
-        frame = pd.read_csv(path, usecols=TICK_COLUMNS)
-    return normalize_ticks_frame(frame)
+        frame = pd.read_csv(path, usecols=columns)
+    return normalize_ticks_frame(_ensure_tick_columns(frame))
 
 
 def read_round_ticks(path: Path, round_number: int) -> pd.DataFrame:
+    columns = _available_tick_columns(path)
     if path.suffix == ".parquet":
         try:
-            frame = pd.read_parquet(path, columns=TICK_COLUMNS, filters=[("round", "==", round_number)])
+            frame = pd.read_parquet(path, columns=columns, filters=[("round", "==", round_number)])
         except Exception:
-            frame = pd.read_parquet(path, columns=TICK_COLUMNS)
+            frame = pd.read_parquet(path, columns=columns)
             frame = frame[frame["round"] == round_number]
-        return normalize_ticks_frame(frame)
+        return normalize_ticks_frame(_ensure_tick_columns(frame))
 
     chunks = []
-    for chunk in pd.read_csv(path, usecols=TICK_COLUMNS, chunksize=250_000):
+    for chunk in pd.read_csv(path, usecols=columns, chunksize=250_000):
         chunk = chunk[chunk["round"] == round_number]
         if not chunk.empty:
             chunks.append(chunk)
     if not chunks:
-        return pd.DataFrame(columns=TICK_COLUMNS)
-    return normalize_ticks_frame(pd.concat(chunks, ignore_index=True))
+        return _ensure_tick_columns(pd.DataFrame(columns=columns))
+    return normalize_ticks_frame(_ensure_tick_columns(pd.concat(chunks, ignore_index=True)))
 
 
 def normalize_ticks_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -317,6 +357,15 @@ def build_round_frames_streamed(group: pd.DataFrame, map_cfg: Any) -> list[dict[
             if x is None or y is None:
                 continue
             radar_x, radar_y = map_cfg.game_to_radar(x, y)
+            weapons_raw = row_data.get("weapons")
+            if weapons_raw is None:
+                weapons = []
+            elif isinstance(weapons_raw, (list, tuple)):
+                weapons = [str(item) for item in weapons_raw if item is not None]
+            elif hasattr(weapons_raw, "tolist"):
+                weapons = [str(item) for item in weapons_raw.tolist() if item is not None]
+            else:
+                weapons = []
             players.append(
                 {
                     "steamid": str(row_data["steamid"]),
@@ -334,10 +383,96 @@ def build_round_frames_streamed(group: pd.DataFrame, map_cfg: Any) -> list[dict[
                     "is_alive": clean_bool(row_data.get("is_alive")),
                     "active_weapon_name": clean_scalar(row_data.get("active_weapon_name")),
                     "has_bomb": clean_bool(row_data.get("has_bomb")),
+                    "balance": clean_int(row_data.get("balance")),
+                    "equip_value": clean_int(row_data.get("equip_value")),
+                    "weapons": weapons,
+                    "cash_spent": clean_int(row_data.get("cash_spent")),
                 }
             )
         frames.append({"tick": int(tick), "players": players})
     return frames
+
+
+LOSS_BONUS_LADDER = [1400, 1900, 2400, 2900, 3400]
+
+
+def round_score_table(rounds: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Running scoreboard + next-round loss bonus per round, derived purely from
+    the round-end winner sequence (no parser prop dependency).
+
+    For each round we record the cumulative T/CT side score AFTER that round,
+    plus the projected next-round loss bonus for each side from the consecutive
+    loss ladder [1400,1900,2400,2900,3400]."""
+    table: dict[int, dict[str, Any]] = {}
+    t_score = 0
+    ct_score = 0
+    t_loss_streak = 0
+    ct_loss_streak = 0
+    for round_row in sorted(rounds, key=lambda r: to_int(r.get("round")) or 0):
+        round_number = to_int(round_row.get("round"))
+        if round_number is None:
+            continue
+        winner = (round_row.get("winner_side") or "").upper()
+        if winner == "T":
+            t_score += 1
+            t_loss_streak = 0
+            ct_loss_streak = min(ct_loss_streak + 1, len(LOSS_BONUS_LADDER))
+        elif winner == "CT":
+            ct_score += 1
+            ct_loss_streak = 0
+            t_loss_streak = min(t_loss_streak + 1, len(LOSS_BONUS_LADDER))
+        next_t_bonus = LOSS_BONUS_LADDER[min(max(t_loss_streak, 1), len(LOSS_BONUS_LADDER)) - 1]
+        next_ct_bonus = LOSS_BONUS_LADDER[min(max(ct_loss_streak, 1), len(LOSS_BONUS_LADDER)) - 1]
+        table[round_number] = {
+            "round": round_number,
+            "t_score": t_score,
+            "ct_score": ct_score,
+            "winner_side": winner or None,
+            "reason": round_row.get("reason"),
+            "next_loss_bonus": {"T": next_t_bonus, "CT": next_ct_bonus},
+            "t_loss_streak": t_loss_streak,
+            "ct_loss_streak": ct_loss_streak,
+        }
+    return table
+
+
+def build_round_economy(round_info: dict[str, Any], frames: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-round economy snapshot at the freeze-end (buy-locked) frame: each
+    team's per-player balance/equip_value/weapons plus team totals."""
+    freeze_end = to_int(round_info.get("freeze_end_tick"))
+    snapshot_frame = None
+    if freeze_end is not None:
+        for frame in frames:
+            frame_tick = to_int(frame.get("tick"))
+            if frame_tick is not None and frame_tick >= freeze_end:
+                snapshot_frame = frame
+                break
+    if snapshot_frame is None and frames:
+        snapshot_frame = frames[0]
+    teams = {
+        "T": {"players": [], "team_balance": 0, "team_equip_value": 0},
+        "CT": {"players": [], "team_balance": 0, "team_equip_value": 0},
+    }
+    for player in (snapshot_frame or {}).get("players", []):
+        side = (player.get("side") or player.get("team") or "").upper()
+        if side not in teams:
+            continue
+        balance = player.get("balance")
+        equip = player.get("equip_value")
+        teams[side]["players"].append(
+            {
+                "steamid": player.get("steamid"),
+                "name": player.get("name"),
+                "balance": balance,
+                "equip_value": equip,
+                "weapons": player.get("weapons") or [],
+            }
+        )
+        if isinstance(balance, int):
+            teams[side]["team_balance"] += balance
+        if isinstance(equip, int):
+            teams[side]["team_equip_value"] += equip
+    return {"snapshot_tick": to_int((snapshot_frame or {}).get("tick")), "T": teams["T"], "CT": teams["CT"]}
 
 
 def round_manifest(rounds: list[dict[str, Any]], ticks: pd.DataFrame, demo_id: str) -> list[dict[str, Any]]:
@@ -346,11 +481,13 @@ def round_manifest(rounds: list[dict[str, Any]], ticks: pd.DataFrame, demo_id: s
 
 
 def round_manifest_from_counts(rounds: list[dict[str, Any]], frame_counts: dict[int, int], demo_id: str) -> list[dict[str, Any]]:
+    score_table = round_score_table(rounds)
     return [
         {
             **round_row,
             "frame_count": int(frame_counts.get(to_int(round_row.get("round")) or -1, 0)),
             "round_url": f"/api/demos/{demo_id}/rounds/{round_row.get('round')}",
+            "score": score_table.get(to_int(round_row.get("round"))),
         }
         for round_row in rounds
     ]

@@ -31,6 +31,8 @@
       <div class="canvas-wrap">
         <div id="mapStage" class="map-stage">
           <canvas id="radarCanvas" width="1024" height="1024"></canvas>
+          <div id="scoreboard" class="scoreboard" hidden></div>
+          <div id="economyHud" class="economy-hud" hidden></div>
           <div id="mapToolbar" class="map-toolbar" aria-label="地图工具栏">
             <button type="button" class="map-tool-button active" data-map-tool="select">选择</button>
             <button type="button" class="map-tool-button" data-map-tool="pan">拖图</button>
@@ -207,6 +209,8 @@
             <label><input id="showHealthBars" type="checkbox" checked /> 血条</label>
             <label><input id="showNames" type="checkbox" checked /> 名字</label>
             <label><input id="showYaw" type="checkbox" checked /> 朝向</label>
+            <label><input id="showScoreboard" type="checkbox" checked /> 比分栏</label>
+            <label><input id="showEconomyHud" type="checkbox" checked /> 经济/武器 HUD</label>
           </div>
         </section>
         <section>

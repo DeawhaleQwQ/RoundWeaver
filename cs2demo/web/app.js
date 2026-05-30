@@ -114,6 +114,8 @@ const state = {
     showSmokeRange: true,
     showSmokeTimer: true,
     showMolotovRange: true,
+    showEconomyHud: true,
+    showScoreboard: true,
     types: {
       smoke: true,
       flashbang: true,
@@ -206,6 +208,10 @@ const els = {
   showSmokeRange: document.getElementById('showSmokeRange'),
   showSmokeTimer: document.getElementById('showSmokeTimer'),
   showMolotovRange: document.getElementById('showMolotovRange'),
+  showEconomyHud: document.getElementById('showEconomyHud'),
+  showScoreboard: document.getElementById('showScoreboard'),
+  scoreboard: document.getElementById('scoreboard'),
+  economyHud: document.getElementById('economyHud'),
   showSmoke: document.getElementById('showSmoke'),
   showFlashbang: document.getElementById('showFlashbang'),
   showHegrenade: document.getElementById('showHegrenade'),
@@ -429,6 +435,8 @@ function bindEvents() {
   bindFilter(els.showSmokeRange, value => { state.filters.showSmokeRange = value; });
   bindFilter(els.showSmokeTimer, value => { state.filters.showSmokeTimer = value; });
   bindFilter(els.showMolotovRange, value => { state.filters.showMolotovRange = value; });
+  bindFilter(els.showEconomyHud, value => { state.filters.showEconomyHud = value; renderEconomyHud(currentFrame()); });
+  bindFilter(els.showScoreboard, value => { state.filters.showScoreboard = value; renderScoreboard(); });
   bindFilter(els.showSmoke, value => { state.filters.types.smoke = value; });
   bindFilter(els.showFlashbang, value => { state.filters.types.flashbang = value; });
   bindFilter(els.showHegrenade, value => { state.filters.types.hegrenade = value; });
@@ -2213,6 +2221,8 @@ function draw() {
   ctx.restore();
 
   updateStatusText(frame);
+  renderScoreboard();
+  renderEconomyHud(frame);
 }
 
 function updateStatusText(frame) {
@@ -2227,6 +2237,76 @@ function updateStatusText(frame) {
   const roundSeconds = Number.isFinite(range.startTick) ? Math.max(0, (displayTick - range.startTick) / getTickRate()) : 0;
   els.tickText.textContent = `R${state.currentRound}/${totalRounds} · ${formatSeconds(roundSeconds)} · tick ${displayTick} · frame ${state.frameIndex + 1}/${state.roundData.frames.length}`;
   els.modeText.textContent = state.sandbox ? (state.sandbox.playing ? 'Sandbox / Playing' : 'Sandbox / Paused') : (state.playing ? 'Replay / Playing' : 'Replay / Paused');
+}
+
+const WEAPON_PRIMARY = new Set(['AK-47','M4A4','M4A1-S','AWP','SSG 08','Galil AR','FAMAS','SG 553','AUG','G3SG1','SCAR-20','MAC-10','MP9','MP7','MP5-SD','UMP-45','P90','PP-Bizon','Nova','XM1014','Sawed-Off','MAG-7','M249','Negev']);
+
+function weaponSummary(weapons) {
+  const list = (weapons || []).filter(w => w && !/knife|^C4|Zeus|Taser/i.test(w));
+  const primary = list.find(w => WEAPON_PRIMARY.has(w));
+  const nades = list.filter(w => /Grenade|Molotov|Incendiary|Flashbang|Decoy|Explosive/i.test(w)).length;
+  const parts = [];
+  if (primary) parts.push(primary);
+  if (nades) parts.push(`+${nades}🧨`);
+  return parts.join(' ') || (list[0] || '-');
+}
+
+function renderScoreboard() {
+  const el = els.scoreboard;
+  if (!el) return;
+  const score = state.roundData?.score;
+  if (state.sandbox || !state.filters.showScoreboard || !score) { el.hidden = true; return; }
+  const total = state.replayIndex?.roundNumbers.length || '';
+  el.hidden = false;
+  el.innerHTML = `
+    <span class="score-side score-t">T</span>
+    <span class="score-num">${score.t_score ?? 0}</span>
+    <span class="score-sep">:</span>
+    <span class="score-num">${score.ct_score ?? 0}</span>
+    <span class="score-side score-ct">CT</span>
+    <span class="score-round">R${score.round}${total ? '/' + total : ''}</span>
+  `;
+}
+
+function renderEconomyHud(frame) {
+  const el = els.economyHud;
+  if (!el) return;
+  const economy = state.roundData?.economy;
+  const score = state.roundData?.score;
+  if (state.sandbox || !state.filters.showEconomyHud || (!economy && !frame)) { el.hidden = true; return; }
+  el.hidden = false;
+  const nextLB = score?.next_loss_bonus || {};
+  // Prefer the live current frame (reflects the playback moment + real loadouts);
+  // fall back to the round's freeze-end economy snapshot.
+  const livePlayers = (frame?.players || []);
+  const sideBlock = (side) => {
+    let players = livePlayers.filter(p => String(p.side || p.team || '').toUpperCase() === side);
+    if (!players.length) players = (economy?.[side]?.players) || [];
+    let teamBalance = 0;
+    let teamEquip = 0;
+    const rows = players.map(p => {
+      const balance = Number.isFinite(p.balance) ? p.balance : 0;
+      const equip = Number.isFinite(p.equip_value) ? p.equip_value : 0;
+      teamBalance += balance;
+      teamEquip += equip;
+      return `
+      <div class="eco-player">
+        <span class="eco-name">${escapeHtml(p.name || '-')}</span>
+        <span class="eco-money">$${balance}</span>
+        <span class="eco-weapon">${escapeHtml(weaponSummary(p.weapons))}</span>
+      </div>`;
+    }).join('');
+    return `
+      <div class="eco-team eco-${side.toLowerCase()}">
+        <div class="eco-team-head">
+          <span class="eco-team-name">${side}</span>
+          <span class="eco-team-totals">装备 $${teamEquip} · 余额 $${teamBalance}</span>
+          <span class="eco-lossbonus" title="下回合战败补偿">败补 $${nextLB[side] ?? '-'}</span>
+        </div>
+        <div class="eco-players">${rows}</div>
+      </div>`;
+  };
+  el.innerHTML = sideBlock('T') + sideBlock('CT');
 }
 
 function drawUtilityEvents(tick, utilities) {

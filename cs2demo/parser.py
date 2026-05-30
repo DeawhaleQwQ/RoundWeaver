@@ -45,6 +45,10 @@ TICK_PROPS = [
     "has_bomb",
     "team_name",
     "team_num",
+    "balance",
+    "current_equip_value",
+    "inventory",
+    "cash_spent_this_round",
 ]
 
 POSITION_PROPS = ["X", "Y", "Z"]
@@ -228,6 +232,11 @@ class Cs2DemoParser:
             alive = record.get("is_alive")
             if alive is None and record.get("life_state") is not None:
                 alive = to_int(record.get("life_state")) == 0
+            inventory = record.get("inventory")
+            if isinstance(inventory, (list, tuple)):
+                weapons = [str(item) for item in inventory if item is not None]
+            else:
+                weapons = []
             samples.append(
                 {
                     "tick": tick,
@@ -245,6 +254,10 @@ class Cs2DemoParser:
                     "is_alive": bool(alive) if alive is not None else None,
                     "active_weapon_name": record.get("active_weapon_name"),
                     "has_bomb": record.get("has_bomb"),
+                    "balance": to_int(record.get("balance")),
+                    "equip_value": to_int(record.get("current_equip_value")),
+                    "weapons": weapons,
+                    "cash_spent": to_int(record.get("cash_spent_this_round")),
                 }
             )
         return samples

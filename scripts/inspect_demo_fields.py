@@ -39,6 +39,11 @@ TICK_PROP_CANDIDATES = [
     "team_num",
     "player_name",
     "steamid",
+    "balance",
+    "current_equip_value",
+    "inventory",
+    "cash_spent_this_round",
+    "total_cash_spent",
 ]
 
 
