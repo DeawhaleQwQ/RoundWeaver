@@ -14,9 +14,12 @@
 #### 1.1 Demo replay
 
 Play a CS2 `.dem` back in your browser as a clean 2D top-down view on Dust2:
-round selection, prev/next round, ±5s seek, play/pause, timeline scrub, event
-markers, finding jump, player tokens with health bars / names / yaw arrows, and
-fine-grained utility trajectory & effect toggles.
+round selection, prev/next round, ±5s seek, play/pause, **playback speed
+(0.25–4x)**, timeline scrub, event markers, finding jump, player tokens with
+health bars / names / yaw arrows, and fine-grained utility trajectory & effect
+toggles. A **scoreboard** (T:CT + round) and an **economy/weapon HUD** (both
+teams' money, equipment value, loadout, and next-round loss bonus / 战败补偿)
+overlay the map.
 
 ![Demo replay in the browser](assets/screenshots/replay_desktop.png)
 
@@ -58,6 +61,17 @@ open the link, pick a nickname and a side/identity, and join.
 > public HTTPS tunnel (`--tunnel cloudflared`). A public tunnel exposes the
 > service to the internet **without authentication** — only enable it on a
 > trusted network and tear it down when done.
+
+#### 1.5 Homepage, teams & member profiles, notebooks
+
+The app is multi-page (vanilla HTML/JS, no framework): a homepage at `/`, the
+replay at `/replay`, a **Demo Analysis** page at `/analysis`, and **Teams** at
+`/teams`. The analysis page reads existing export data (player stats + findings)
+and can filter results to a specific team's members (matched by SteamID or
+name/aliases). On the teams page you create a team, set members, and open each
+member's **profile notebook**. A general **notebook library** (create / save /
+recall, stored as local JSON) is available in the replay bottom dock; member
+profile notebooks share that same store.
 
 ### 2. Quickstart
 
@@ -129,8 +143,10 @@ conda run -n cs2demo python -m cs2demo.cli export-replay samples/demos/<your_dem
 #### 1.1 Demo 回放
 
 把 CS2 `.dem` 在网页里以 Dust2 的 2D 俯视图回放：round 选择、上一/下一回合、
-前进/后退 5 秒、播放/暂停、时间轴拖动、事件 marker、finding 跳转、人物 token
-血条/名字/朝向，以及细粒度的道具轨迹与效果开关。
+前进/后退 5 秒、播放/暂停、**倍速（0.25–4x）**、时间轴拖动、事件 marker、finding
+跳转、人物 token 血条/名字/朝向，以及细粒度的道具轨迹与效果开关。地图上叠加
+**比分栏**（T:CT + 回合）与**经济/武器 HUD**（双方金钱、装备价值、loadout、下回合
+战败补偿）。
 
 ![网页中回放 demo](assets/screenshots/replay_desktop.png)
 
@@ -167,6 +183,14 @@ conda run -n cs2demo python -m cs2demo.cli export-replay samples/demos/<your_dem
 > 房间默认只在本机可用。要分享给不在同一局域网的队友，用公网 HTTPS 隧道
 > （`--tunnel cloudflared`）。注意：公网隧道会把服务暴露到互联网且**没有任何身份
 > 认证**，请只在可信网络下临时启用，用完即关。
+
+#### 1.5 首页、战队与成员画像、笔记本
+
+应用为多页结构（原生 HTML/JS，不用框架）：首页 `/`、回放 `/replay`、**Demo 分析**
+页 `/analysis`、**战队** `/teams`。分析页只读现有导出数据（玩家数据 + findings），
+可按某战队成员（按 SteamID 或昵称/别名匹配）筛选结果。战队页可创建战队、设置成员，
+并进入每个成员的**画像笔记本**。回放页底部还有通用**笔记本库**（随时新建/保存/调用，
+本地 JSON 存储）；成员画像笔记本与其共用同一存储。
 
 ### 2. Quickstart
 

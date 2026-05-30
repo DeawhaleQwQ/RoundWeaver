@@ -193,10 +193,23 @@
 .field-row input { padding: 8px 10px; background: var(--panel-3); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; }
 
 .member-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
-.member-row { display: grid; grid-template-columns: 1fr 1.2fr 1.4fr auto; gap: 8px; align-items: center; }
+.member-row { display: grid; grid-template-columns: 1fr 1.2fr 1.4fr auto auto; gap: 8px; align-items: center; }
 .member-row input { padding: 7px 9px; background: var(--panel-3); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; }
-.member-row .m-remove { padding: 6px 10px; }
+.member-row .m-remove, .member-row .m-profile { padding: 6px 10px; }
 .editor-actions { display: flex; gap: 10px; margin-top: 14px; }
+
+.member-profile-meta { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+#memberProfile #profileNotebookTitle {
+  width: 100%; box-sizing: border-box; padding: 8px 10px; margin-bottom: 8px;
+  background: var(--panel-3); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); font-size: 14px; font-weight: 600;
+}
+#memberProfile #profileNotebookBody {
+  width: 100%; box-sizing: border-box; min-height: 220px; resize: vertical; padding: 10px;
+  background: var(--panel-3); border: 1px solid var(--border); border-radius: 10px;
+  color: var(--text); font-family: inherit; font-size: 13px; line-height: 1.5;
+}
+#memberProfile #profileNotebookTitle:focus, #memberProfile #profileNotebookBody:focus { outline: none; border-color: var(--accent); }
 
 .stats-table { overflow-x: auto; }
 table.stats { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -207,6 +220,6 @@ table.stats tbody tr:hover { background: var(--panel-2); }
 .analysis-findings { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
 
 @media (max-width: 640px) {
-  .member-row { grid-template-columns: 1fr auto; }
+  .member-row { grid-template-columns: 1fr auto auto; }
   .member-row .m-steamid, .member-row .m-aliases { grid-column: 1 / -1; }
 }

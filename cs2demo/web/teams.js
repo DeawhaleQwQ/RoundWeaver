@@ -18,9 +18,17 @@ const els = {
   addMemberBtn: document.getElementById('addMemberBtn'),
   saveBtn: document.getElementById('saveTeamBtn'),
   deleteBtn: document.getElementById('deleteTeamBtn'),
+  profile: document.getElementById('memberProfile'),
+  profileTitle: document.getElementById('memberProfileTitle'),
+  profileStatus: document.getElementById('memberProfileStatus'),
+  profileMeta: document.getElementById('memberProfileMeta'),
+  profileNbTitle: document.getElementById('profileNotebookTitle'),
+  profileNbBody: document.getElementById('profileNotebookBody'),
+  saveProfileBtn: document.getElementById('saveProfileBtn'),
+  closeProfileBtn: document.getElementById('closeProfileBtn'),
 };
 
-const state = { teams: [], current: null };
+const state = { teams: [], current: null, profileMember: null, profileNotebookId: null };
 
 function teamIdFromUrl() {
   const m = window.location.pathname.match(/^\/teams\/([^/]+)\/?$/);
@@ -58,8 +66,10 @@ function memberRow(member = {}) {
     <input class="m-name" type="text" maxlength="60" placeholder="昵称" value="${esc(member.display_name || '')}" />
     <input class="m-steamid" type="text" placeholder="SteamID64（可选）" value="${esc(member.steamid || '')}" />
     <input class="m-aliases" type="text" placeholder="别名，逗号分隔（可选）" value="${esc((member.aliases || []).join(', '))}" />
+    <button class="m-profile" type="button" title="编辑画像">档案</button>
     <button class="m-remove" type="button" title="移除">✕</button>`;
   row.querySelector('.m-remove').addEventListener('click', () => row.remove());
+  row.querySelector('.m-profile').addEventListener('click', () => openMemberProfile(member.member_id));
   return row;
 }
 
@@ -138,10 +148,76 @@ async function deleteTeam() {
   }
 }
 
+async function openMemberProfile(memberId) {
+  if (!state.current?.team_id || !memberId) {
+    alert('请先保存战队，再编辑成员画像。');
+    return;
+  }
+  // reload team to get authoritative member + profile_notebook_id
+  const team = (await api(`/api/teams/${encodeURIComponent(state.current.team_id)}`)).team;
+  state.current = team;
+  const member = (team.members || []).find(m => m.member_id === memberId);
+  if (!member) { alert('未找到该成员，请先保存战队。'); return; }
+  state.profileMember = member;
+  els.profile.hidden = false;
+  els.profileTitle.textContent = `成员画像 · ${member.display_name}`;
+  els.profileStatus.textContent = '';
+  els.profileMeta.innerHTML = `SteamID：${esc(member.steamid || '—')}　别名：${esc((member.aliases || []).join(', ') || '—')}`;
+  try {
+    let notebookId = member.profile_notebook_id;
+    if (notebookId) {
+      const nb = (await api(`/api/notebooks/${encodeURIComponent(notebookId)}`)).notebook;
+      els.profileNbTitle.value = nb.title || '';
+      els.profileNbBody.value = nb.body || '';
+    } else {
+      // create a profile notebook bound to this member
+      const nb = (await api('/api/notebooks', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: `${member.display_name} 画像`, body: '', owner_member_id: member.member_id }),
+      })).notebook;
+      notebookId = nb.notebook_id;
+      member.profile_notebook_id = notebookId;
+      // persist the pointer on the team
+      await api(`/api/teams/${encodeURIComponent(team.team_id)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ members: team.members }),
+      });
+      els.profileNbTitle.value = nb.title || '';
+      els.profileNbBody.value = nb.body || '';
+    }
+    state.profileNotebookId = notebookId;
+  } catch (err) {
+    console.error(err);
+    els.profileStatus.textContent = '画像加载失败';
+  }
+}
+
+async function saveMemberProfile() {
+  if (!state.profileNotebookId) return;
+  try {
+    await api(`/api/notebooks/${encodeURIComponent(state.profileNotebookId)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: els.profileNbTitle.value.trim() || `${state.profileMember?.display_name || '成员'} 画像`, body: els.profileNbBody.value }),
+    });
+    els.profileStatus.textContent = '已保存';
+  } catch (err) {
+    console.error(err);
+    els.profileStatus.textContent = '保存失败';
+  }
+}
+
+function closeMemberProfile() {
+  els.profile.hidden = true;
+  state.profileMember = null;
+  state.profileNotebookId = null;
+}
+
 els.newTeamBtn.addEventListener('click', newTeam);
 els.addMemberBtn.addEventListener('click', () => els.memberRows.appendChild(memberRow()));
 els.saveBtn.addEventListener('click', saveTeam);
 els.deleteBtn.addEventListener('click', deleteTeam);
+els.saveProfileBtn.addEventListener('click', saveMemberProfile);
+els.closeProfileBtn.addEventListener('click', closeMemberProfile);
 
 (async () => {
   renderTopNav('teams');

@@ -37,6 +37,20 @@
         <button id="deleteTeamBtn" type="button">删除战队</button>
       </div>
     </section>
+
+    <section class="page-section" id="memberProfile" hidden>
+      <div class="section-head">
+        <h2 id="memberProfileTitle">成员画像</h2>
+        <span id="memberProfileStatus" class="hint"></span>
+      </div>
+      <div id="memberProfileMeta" class="member-profile-meta"></div>
+      <input id="profileNotebookTitle" type="text" maxlength="120" placeholder="画像标题" />
+      <textarea id="profileNotebookBody" placeholder="记录该成员的打法风格、常用点位、优劣势、训练建议……"></textarea>
+      <div class="editor-actions">
+        <button id="saveProfileBtn" class="primary-button" type="button">保存画像</button>
+        <button id="closeProfileBtn" type="button">返回</button>
+      </div>
+    </section>
   </main>
 
   <footer class="home-footer">战队/成员数据保存在本地 outputs/teams/*.json</footer>
